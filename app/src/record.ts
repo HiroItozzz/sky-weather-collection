@@ -4,7 +4,6 @@ import {
   angularSpreadDeg,
   cameraAngles,
   cameraDirection,
-  normalizeDeg,
   toTrueAzimuth,
   type Mat3,
 } from "./orientation";
@@ -67,6 +66,12 @@ function round(value: number, digits: number): number {
   return Math.round(value * k) / k + 0;
 }
 
+/** 方位角を小数第2位に丸める。丸めて 360 になったら 0 にする（% で丸め誤差が戻らないよう、剰余は取らない）。 */
+function roundAzimuth(deg: number): number {
+  const r = round(deg, 2);
+  return r >= 360 ? 0 : r;
+}
+
 function roundOrNull(value: number | null, digits: number): number | null {
   return value === null ? null : round(value, digits);
 }
@@ -111,7 +116,7 @@ export function buildRecord(input: RecordInput): SensorRecord {
     const azimuth =
       declinationDeg === null
         ? null
-        : normalizeDeg(round(toTrueAzimuth(angles.azimuthDeg, declinationDeg), 2));
+        : roundAzimuth(toTrueAzimuth(angles.azimuthDeg, declinationDeg));
     orientation = {
       azimuth_deg: azimuth,
       pitch_deg: round(angles.pitchDeg, 2),
