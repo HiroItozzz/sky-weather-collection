@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import pytest
 from conftest import make_metadata
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from gcp_fakes import FakeFirestoreClient, FakeStorageClient, FakeTasksClient
 from starlette.requests import Request
 
@@ -109,7 +110,25 @@ def test_firestore_コレクションの名前():
     FirestoreObservationRepository(client).add_user(make_user())
     FirestoreObservationRepository(client).add_observation({"observation_id": "o1"})
     FirestoreJobRepository(client).add_job(make_job())
-    assert set(client.collections) == {"users", "observations", "weather_jobs"}
+    FirestoreObservationRepository(client).increment_daily_count("u1", "20261009")
+    assert set(client.collections) == {"users", "observations", "weather_jobs", "usage"}
+
+
+def test_firestore_1日の件数は記録がなければ0で増やすたびに1ずつ増える():
+    client = FakeFirestoreClient()
+    repo = FirestoreObservationRepository(client)
+    assert repo.get_daily_count("u1", "20261009") == 0
+    repo.increment_daily_count("u1", "20261009")
+    repo.increment_daily_count("u1", "20261009")
+    repo.increment_daily_count("u1", "20261010")
+    assert repo.get_daily_count("u1", "20261009") == 2
+    assert repo.get_daily_count("u1", "20261010") == 1
+    assert repo.get_daily_count("u2", "20261009") == 0
+    assert client.collections["usage"]["u1_20261009"] == {
+        "user_id": "u1",
+        "day": "20261009",
+        "count": 2,
+    }
 
 
 def test_firestore_天気ジョブの用意がそのまま動く():
@@ -380,3 +399,34 @@ def test_localのcreate_appは従来どおり動く(tmp_path, monkeypatch):
     monkeypatch.delenv("SKY_BACKEND", raising=False)
     create_app(tmp_path)
     assert LocalBlobStore(tmp_path).get("none") is None
+
+
+# gcp での小さな修正
+
+
+def test_gcpでSKY_TASK_AUTHがnoneなら起動時にエラー(gcp_env):
+    patch_clients(gcp_env)
+    gcp_env.setenv("SKY_TASK_AUTH", "none")
+    with pytest.raises(ConfigError, match="SKY_TASK_AUTH"):
+        get_task_authenticator()
+    with pytest.raises(ConfigError, match="SKY_TASK_AUTH"):
+        create_app()
+
+
+def test_localならSKY_TASK_AUTHがnoneでも起動できる(tmp_path, monkeypatch):
+    monkeypatch.delenv("SKY_BACKEND", raising=False)
+    monkeypatch.setenv("SKY_TASK_AUTH", "none")
+    create_app(tmp_path)
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_gcpでは仕様の画面を公開しない(gcp_env, path):
+    patch_clients(gcp_env)
+    gcp_env.setenv("SKY_TASK_AUTH", "oidc")
+    assert TestClient(create_app()).get(path).status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_localでは仕様の画面を公開する(tmp_path, monkeypatch, path):
+    monkeypatch.delenv("SKY_BACKEND", raising=False)
+    assert TestClient(create_app(tmp_path)).get(path).status_code == 200

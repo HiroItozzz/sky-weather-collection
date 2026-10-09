@@ -1,6 +1,7 @@
 """GCP のクライアントの偽物。コードが使う範囲だけを真似る。"""
 
 from google.api_core.exceptions import AlreadyExists, NotFound
+from google.cloud import firestore
 
 
 class FakeSnapshot:
@@ -22,8 +23,17 @@ class FakeDocument:
             raise AlreadyExists("すでにあります")
         self._docs[self._id] = dict(data)
 
-    def set(self, data: dict) -> None:
-        self._docs[self._id] = dict(data)
+    def set(self, data: dict, merge: bool = False) -> None:
+        if not merge:
+            self._docs[self._id] = dict(data)
+            return
+        # merge=True では、渡した項目だけを書き換える。Increment は今の値に足す
+        doc = self._docs.setdefault(self._id, {})
+        for key, value in data.items():
+            if isinstance(value, firestore.Increment):
+                doc[key] = doc.get(key, 0) + value.value
+            else:
+                doc[key] = value
 
     def get(self) -> FakeSnapshot:
         return FakeSnapshot(self._docs.get(self._id))

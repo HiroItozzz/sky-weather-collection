@@ -31,6 +31,14 @@ class ObservationRepository(ABC):
     def add_observation(self, record: dict) -> bool:
         """観測を保存する。同じ ID がすでにあれば保存せず False を返す。"""
 
+    @abstractmethod
+    def get_daily_count(self, user_id: str, day: str) -> int:
+        """撮影者のその日（`YYYYMMDD`）の新規の観測の件数。記録がなければ 0。"""
+
+    @abstractmethod
+    def increment_daily_count(self, user_id: str, day: str) -> None:
+        """撮影者のその日（`YYYYMMDD`）の件数を 1 増やす。"""
+
 
 class BlobStore(ABC):
     """画像や天気データ（バイト列）の保存先。"""
@@ -48,8 +56,10 @@ class LocalObservationRepository(ObservationRepository):
     def __init__(self, root: Path) -> None:
         self._users = root / "users"
         self._observations = root / "observations"
+        self._usage = root / "usage"
         self._users.mkdir(parents=True, exist_ok=True)
         self._observations.mkdir(parents=True, exist_ok=True)
+        self._usage.mkdir(parents=True, exist_ok=True)
 
     def add_user(self, user: User) -> None:
         self.update_user(user)
@@ -80,6 +90,21 @@ class LocalObservationRepository(ObservationRepository):
         path = self._observations / f"{record['observation_id']}.json"
         data = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
         return _create_exclusive(path, data)
+
+    def get_daily_count(self, user_id: str, day: str) -> int:
+        path = self._usage / f"{user_id}_{day}.json"
+        if not path.exists():
+            return 0
+        return json.loads(path.read_text(encoding="utf-8"))["count"]
+
+    def increment_daily_count(self, user_id: str, day: str) -> None:
+        # 読んでから書くまでの間の同時実行で数え漏らすことは許容する（上限は被害を抑えるためのもの）
+        count = self.get_daily_count(user_id, day) + 1
+        data = {"user_id": user_id, "day": day, "count": count}
+        _write_atomic(
+            self._usage / f"{user_id}_{day}.json",
+            json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
 
 
 class LocalBlobStore(BlobStore):

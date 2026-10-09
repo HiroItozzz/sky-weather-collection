@@ -27,6 +27,14 @@ def get_open_meteo_url() -> str:
     return os.environ.get("SKY_OPEN_METEO_URL", DEFAULT_OPEN_METEO_URL)
 
 
+DEFAULT_DAILY_UPLOAD_LIMIT = 100
+
+
+def get_daily_upload_limit() -> int:
+    """撮影者ごとの1日（UTC）の新規の観測の上限。"""
+    return int(os.environ.get("SKY_DAILY_UPLOAD_LIMIT", DEFAULT_DAILY_UPLOAD_LIMIT))
+
+
 class ConfigError(ValueError):
     """設定の値が正しくない、または必須の設定が足りないときのエラー。"""
 

@@ -11,6 +11,7 @@ from sky_server.storage import ObservationRepository
 USERS = "users"
 OBSERVATIONS = "observations"
 WEATHER_JOBS = "weather_jobs"
+USAGE = "usage"
 
 
 def _create(client, collection: str, doc_id: str, data: dict) -> bool:
@@ -58,6 +59,15 @@ class FirestoreObservationRepository(ObservationRepository):
 
     def add_observation(self, record: dict) -> bool:
         return _create(self._client, OBSERVATIONS, record["observation_id"], record)
+
+    def get_daily_count(self, user_id: str, day: str) -> int:
+        data = _get(self._client, USAGE, f"{user_id}_{day}")
+        return 0 if data is None else data["count"]
+
+    def increment_daily_count(self, user_id: str, day: str) -> None:
+        self._client.collection(USAGE).document(f"{user_id}_{day}").set(
+            {"user_id": user_id, "day": day, "count": firestore.Increment(1)}, merge=True
+        )
 
 
 class FirestoreJobRepository(JobRepository):
