@@ -4,6 +4,7 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from conftest import RAIN_ANSWER, WEATHER_AT_CAPTURE
 from gcp_fakes import FakeFirestoreClient, FakeStorageClient, FakeTasksClient
 from test_gcp import GCP_ENV
 
@@ -11,7 +12,7 @@ from sky_server import admin
 from sky_server.admin import create_user, main
 from sky_server.backends import build_backend
 from sky_server.jobs import ProviderState, WeatherJob
-from sky_server.weather.common import raw_key
+from sky_server.weather.common import raw_key, save_envelope
 
 NOW = datetime(2026, 10, 9, 3, 0, tzinfo=UTC)
 
@@ -342,3 +343,149 @@ def _recording(original, name, order):
         return original(self, *args)
 
     return wrapper
+
+
+# 要約の作り直し
+
+REBUILD_A = "cc000000-0000-4000-8000-000000000001"
+REBUILD_B = "cc000000-0000-4000-8000-000000000002"
+
+
+def seed_for_rebuild(backend, observation_id: str, captured_at: str, **statuses: str) -> None:
+    """観測と、`statuses`（phase -> ジョブの状態）のジョブを作る。封筒はジョブごとに保存する。"""
+    user_id = new_user(backend, f"user-{observation_id[-1]}")
+    backend.repository.add_observation(
+        {
+            "observation_id": observation_id,
+            "user_id": user_id,
+            "captured_at": captured_at,
+            "received_at": "2026-10-09T03:05:00+00:00",
+        }
+    )
+    for phase, status in statuses.items():
+        providers = {}
+        for provider in ("open_meteo", "amedas") if phase == "label" else ("open_meteo",):
+            key = raw_key(provider, observation_id, phase)
+            save_envelope(backend.weather_store, key, {"provider": provider, "phase": phase})
+            providers[provider] = ProviderState(status="done", blob_key=key)
+        backend.job_repository.add_job(
+            WeatherJob(
+                job_id=f"{observation_id}_{phase}",
+                observation_id=observation_id,
+                phase=phase,
+                status=status,
+                created_at=NOW,
+                run_at=NOW,
+                next_attempt_at=None if status != "pending" else NOW,
+                providers=providers,
+            )
+        )
+
+
+def test_作り直すと撮影時刻のUTCが補われる(backend, fake_summary, capsys):
+    seed_for_rebuild(backend, REBUILD_A, "2026-10-09T12:00:00.123+09:00")
+    seed_for_rebuild(backend, REBUILD_B, "2026-10-09T03:00:00Z")
+    assert main(["rebuild-summaries"]) == 0
+    assert backend.repository.get_observation(REBUILD_A)["captured_at_utc"] == (
+        "2026-10-09T03:00:00.123Z"
+    )
+    assert backend.repository.get_observation(REBUILD_B)["captured_at_utc"] == (
+        "2026-10-09T03:00:00.000Z"
+    )
+    assert "処理した観測: 2 件、失敗: 0 件" in capsys.readouterr().out
+
+
+def test_作り直しはあるcaptured_at_utcを書き換えない(backend, fake_summary):
+    seed_for_rebuild(backend, REBUILD_A, "2026-10-09T12:00:00+09:00")
+    backend.repository.update_observation_fields(
+        REBUILD_A, {"captured_at_utc": "2026-10-09T03:00:00.999Z"}
+    )
+    assert main(["rebuild-summaries"]) == 0
+    assert backend.repository.get_observation(REBUILD_A)["captured_at_utc"] == (
+        "2026-10-09T03:00:00.999Z"
+    )
+
+
+def test_作り直すと完了したジョブの要約が計算し直される(backend, fake_summary):
+    seed_for_rebuild(backend, REBUILD_A, "2026-10-09T03:00:00Z", forecast="done", label="failed")
+    assert main(["rebuild-summaries"]) == 0
+    forecast = backend.job_repository.get_job(f"{REBUILD_A}_forecast")
+    label = backend.job_repository.get_job(f"{REBUILD_A}_label")
+    assert forecast.summary == {"weather_at_capture": WEATHER_AT_CAPTURE}
+    assert label.summary == {"answer": RAIN_ANSWER}
+    record = backend.repository.get_observation(REBUILD_A)
+    assert record["weather_at_capture"] == WEATHER_AT_CAPTURE
+    assert record["answer"] == RAIN_ANSWER
+    # 保存した封筒から計算している
+    assert ("weather_at_capture", {"provider": "open_meteo", "phase": "forecast"}) == (
+        fake_summary.calls[0][0],
+        fake_summary.calls[0][1],
+    )
+
+
+def test_作り直しは同じ結果になり何度実行しても変わらない(backend, fake_summary):
+    seed_for_rebuild(backend, REBUILD_A, "2026-10-09T03:00:00Z", forecast="done", label="done")
+    assert main(["rebuild-summaries"]) == 0
+    first = backend.repository.get_observation(REBUILD_A)
+    fake_summary.weather = {**WEATHER_AT_CAPTURE, "temperature_c": 25.0}
+    assert main(["rebuild-summaries"]) == 0
+    # 計算の結果が変われば上書きされる
+    second = backend.repository.get_observation(REBUILD_A)
+    assert second["weather_at_capture"]["temperature_c"] == 25.0
+    assert second["answer"] == first["answer"]
+    assert backend.job_repository.get_job(f"{REBUILD_A}_forecast").summary == {
+        "weather_at_capture": second["weather_at_capture"]
+    }
+
+
+def test_作り直しは完了していないジョブとskippedは計算しない(backend, fake_summary):
+    seed_for_rebuild(
+        backend, REBUILD_A, "2026-10-09T03:00:00Z", forecast="pending", label="skipped"
+    )
+    assert main(["rebuild-summaries"]) == 0
+    assert fake_summary.calls == []
+    record = backend.repository.get_observation(REBUILD_A)
+    assert "weather_at_capture" not in record
+    assert "answer" not in record
+    assert backend.job_repository.get_job(f"{REBUILD_A}_forecast").summary is None
+
+
+def test_ジョブがない観測も作り直しで止まらない(backend, fake_summary, capsys):
+    seed_for_rebuild(backend, REBUILD_A, "2026-10-09T03:00:00Z")
+    assert main(["rebuild-summaries"]) == 0
+    assert "処理した観測: 1 件、失敗: 0 件" in capsys.readouterr().out
+
+
+def test_観測がなければ作り直しは0件で終わる(backend, fake_summary, capsys):
+    assert main(["rebuild-summaries"]) == 0
+    assert "処理した観測: 0 件、失敗: 0 件" in capsys.readouterr().out
+
+
+def test_計算に失敗した観測があっても続けて数えて終了コード1(backend, fake_summary, capsys):
+    seed_for_rebuild(backend, REBUILD_A, "2026-10-09T03:00:00Z", label="done")
+    seed_for_rebuild(backend, REBUILD_B, "2026-10-09T04:00:00Z", forecast="done", label="done")
+    original = fake_summary.answer
+
+    def answer(open_meteo, amedas, captured_at):
+        if captured_at.hour == 3:
+            raise RuntimeError("計算できない")
+        return original(open_meteo, amedas, captured_at)
+
+    fake_summary.answer = answer
+    assert main(["rebuild-summaries"]) == 1
+    captured = capsys.readouterr()
+    assert "処理した観測: 2 件、失敗: 1 件" in captured.out
+    assert REBUILD_A in captured.err
+    # 失敗した観測の要約は null。もう一方は最後まで作り直されている
+    assert backend.job_repository.get_job(f"{REBUILD_A}_label").summary is None
+    assert backend.job_repository.get_job(f"{REBUILD_A}_label").status == "done"
+    assert backend.job_repository.get_job(f"{REBUILD_B}_label").summary == {"answer": RAIN_ANSWER}
+    assert backend.repository.get_observation(REBUILD_B)["weather_at_capture"] == WEATHER_AT_CAPTURE
+
+
+def test_撮影時刻が読めない観測は失敗に数えて続ける(backend, fake_summary, capsys):
+    seed_for_rebuild(backend, REBUILD_A, "壊れた値", forecast="done")
+    seed_for_rebuild(backend, REBUILD_B, "2026-10-09T03:00:00Z", forecast="done")
+    assert main(["rebuild-summaries"]) == 1
+    assert "処理した観測: 2 件、失敗: 1 件" in capsys.readouterr().out
+    assert "weather_at_capture" in backend.repository.get_observation(REBUILD_B)

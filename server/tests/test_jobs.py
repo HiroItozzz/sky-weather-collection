@@ -1,21 +1,32 @@
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from conftest import IMAGE, OBSERVATION_ID, Api, SteppingClock, fixed_clock, make_metadata
+from conftest import (
+    IMAGE,
+    OBSERVATION_ID,
+    RAIN_ANSWER,
+    WEATHER_AT_CAPTURE,
+    Api,
+    SteppingClock,
+    fixed_clock,
+    make_metadata,
+)
 from fastapi.testclient import TestClient
 
 from sky_server.jobs import (
     JobRunner,
     LocalJobRepository,
     LocalTaskScheduler,
+    Summarizer,
     ensure_weather_jobs,
     wait_time,
 )
 from sky_server.main import create_app
 from sky_server.models import ObservationMetadata
-from sky_server.storage import LocalObservationRepository
-from sky_server.weather.common import PermanentError, RetryableError
+from sky_server.storage import LocalBlobStore, LocalObservationRepository
+from sky_server.weather.common import PermanentError, RetryableError, save_envelope
 
 CAPTURED_AT = datetime(2026, 10, 9, 3, 0, tzinfo=UTC)
 RECEIVED_AT = CAPTURED_AT + timedelta(minutes=1)
@@ -27,8 +38,14 @@ LABEL_ID = f"{OBSERVATION_ID}_label"
 class FakeFetcher:
     """取得関数の偽物。`outcomes` を先頭から1つずつ使い、尽きたら成功する。"""
 
-    def __init__(self, name: str, outcomes: list[Exception | None] | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        outcomes: list[Exception | None] | None = None,
+        store: LocalBlobStore | None = None,
+    ) -> None:
         self.name = name
+        self.store = store
         self.outcomes = list(outcomes or [])
         self.calls: list[dict] = []
 
@@ -37,7 +54,10 @@ class FakeFetcher:
         outcome = self.outcomes.pop(0) if self.outcomes else None
         if outcome is not None:
             raise outcome
-        return f"raw/{self.name}/{kwargs['observation_id']}/{kwargs['phase']}.json.gz"
+        key = f"raw/{self.name}/{kwargs['observation_id']}/{kwargs['phase']}.json.gz"
+        if self.store is not None:
+            save_envelope(self.store, key, {"provider": self.name, "phase": kwargs["phase"]})
+        return key
 
 
 class FailingScheduler(LocalTaskScheduler):
@@ -72,12 +92,15 @@ def make_record(location: bool = True) -> dict:
 class Env:
     """ジョブのテストに使う部品をまとめたもの。"""
 
-    def __init__(self, root, amedas_enabled: bool = True, clock=None) -> None:
+    def __init__(
+        self, root, amedas_enabled: bool = True, clock=None, summarize: bool = False
+    ) -> None:
         self.observations = LocalObservationRepository(root)
         self.jobs = LocalJobRepository(root)
         self.scheduler = FailingScheduler(root)
-        self.open_meteo = FakeFetcher("open_meteo")
-        self.amedas = FakeFetcher("amedas")
+        self.weather_store = LocalBlobStore(root, "weather")
+        self.open_meteo = FakeFetcher("open_meteo", store=self.weather_store)
+        self.amedas = FakeFetcher("amedas", store=self.weather_store)
         self.runner = JobRunner(
             self.observations,
             self.jobs,
@@ -85,6 +108,7 @@ class Env:
             {"open_meteo": self.open_meteo, "amedas": self.amedas},
             amedas_enabled=amedas_enabled,
             clock=clock or fixed_clock(CLOCK_NOW),
+            summarizer=Summarizer(self.weather_store) if summarize else None,
         )
 
     def add_observation(self, location: bool = True) -> dict:
@@ -99,6 +123,12 @@ class Env:
 @pytest.fixture
 def env(tmp_path) -> Env:
     return Env(tmp_path)
+
+
+@pytest.fixture
+def summary_env(tmp_path, fake_summary) -> Env:
+    """要約を作る部品つきの環境。要約の計算は `fake_summary` の偽物で行う。"""
+    return Env(tmp_path, summarize=True)
 
 
 # 撮影 03:00 UTC なら、範囲の終わりは 06:00、その3時間後の 09:00 に実行する
@@ -568,3 +598,151 @@ def test_409と422のときはジョブを作らない(put_env):
     assert api.put(token, bad).status_code == 422
     assert env.jobs.get_job(FORECAST_ID) is None
     assert env.jobs.get_job(LABEL_ID) is None
+
+
+# 要約
+
+
+def test_forecastが完了すると要約がジョブに保存され観測にも写る(summary_env, fake_summary):
+    env = summary_env
+    env.ensure(env.add_observation())
+    env.runner.run(FORECAST_ID, RECEIVED_AT)
+    job = env.jobs.get_job(FORECAST_ID)
+    assert job.status == "done"
+    assert job.summary == {"weather_at_capture": WEATHER_AT_CAPTURE}
+    record = env.observations.get_observation(OBSERVATION_ID)
+    assert record["weather_at_capture"] == WEATHER_AT_CAPTURE
+    assert "answer" not in record
+    # 封筒は blob_key から読み、撮影時刻は観測のものを渡す
+    assert fake_summary.calls == [
+        ("weather_at_capture", {"provider": "open_meteo", "phase": "forecast"}, CAPTURED_AT)
+    ]
+
+
+def test_labelが完了すると答えがジョブに保存され観測にも写る(summary_env, fake_summary):
+    env = summary_env
+    env.ensure(env.add_observation())
+    env.runner.run(LABEL_ID, LABEL_RUN_AT)
+    job = env.jobs.get_job(LABEL_ID)
+    assert job.status == "done"
+    assert job.summary == {"answer": RAIN_ANSWER}
+    record = env.observations.get_observation(OBSERVATION_ID)
+    assert record["answer"] == RAIN_ANSWER
+    assert "weather_at_capture" not in record
+    assert fake_summary.calls == [
+        (
+            "answer",
+            {"provider": "open_meteo", "phase": "label"},
+            {"provider": "amedas", "phase": "label"},
+            CAPTURED_AT,
+        )
+    ]
+
+
+def test_failedでも取れた封筒で要約を計算する(summary_env, fake_summary):
+    env = summary_env
+    env.amedas.outcomes = [PermanentError("HTTP 400: bad")]
+    env.ensure(env.add_observation())
+    env.runner.run(LABEL_ID, LABEL_RUN_AT)
+    job = env.jobs.get_job(LABEL_ID)
+    assert job.status == "failed"
+    assert job.summary == {"answer": RAIN_ANSWER}
+    assert env.observations.get_observation(OBSERVATION_ID)["answer"] == RAIN_ANSWER
+    # アメダスの封筒はないので None を渡し、Open-Meteo の封筒だけを渡す
+    assert fake_summary.calls == [
+        ("answer", {"provider": "open_meteo", "phase": "label"}, None, CAPTURED_AT)
+    ]
+
+
+def test_再試行に回るあいだは要約を計算しない(summary_env, fake_summary):
+    env = summary_env
+    env.open_meteo.outcomes = [RetryableError("HTTP 503")]
+    env.ensure(env.add_observation())
+    env.runner.run(FORECAST_ID, RECEIVED_AT)
+    assert env.jobs.get_job(FORECAST_ID).status == "pending"
+    assert env.jobs.get_job(FORECAST_ID).summary is None
+    assert fake_summary.calls == []
+
+
+def test_skippedでは要約を計算しない(summary_env, fake_summary):
+    env = summary_env
+    env.ensure(env.add_observation(location=False))
+    env.runner.run(FORECAST_ID, RECEIVED_AT)
+    # 位置がないので、ジョブを作った時点で skipped になっている。実行時に位置が消えた場合も確かめる
+    env.ensure(env.add_observation())
+    path = env.observations._observations / f"{OBSERVATION_ID}.json"
+    record = json.loads(path.read_text())
+    record["location"] = None
+    path.write_text(json.dumps(record))
+    env.runner.run(LABEL_ID, LABEL_RUN_AT)
+    assert env.jobs.get_job(LABEL_ID).skip_reason == "no_location"
+    assert env.jobs.get_job(LABEL_ID).summary is None
+    assert fake_summary.calls == []
+    assert "answer" not in env.observations.get_observation(OBSERVATION_ID)
+
+
+def test_要約の計算が例外を投げてもジョブの状態はそのままでsummaryはnull(
+    summary_env, fake_summary, caplog
+):
+    env = summary_env
+    fake_summary.error = RuntimeError("計算できない")
+    env.ensure(env.add_observation())
+    with caplog.at_level(logging.ERROR):
+        assert env.runner.run(FORECAST_ID, RECEIVED_AT) == ("ran", None)
+    job = env.jobs.get_job(FORECAST_ID)
+    assert job.status == "done"
+    assert job.summary is None
+    assert job.completed_at == RECEIVED_AT
+    assert "weather_at_capture" not in env.observations.get_observation(OBSERVATION_ID)
+    assert FORECAST_ID in caplog.text
+    assert "計算できない" in caplog.text
+
+
+def test_観測への書き込みに失敗してもジョブの状態はそのままでsummaryはnull(
+    summary_env, monkeypatch, caplog
+):
+    env = summary_env
+
+    def broken(observation_id, fields):
+        raise ConnectionError("書き込めない")
+
+    monkeypatch.setattr(env.observations, "update_observation_fields", broken)
+    env.ensure(env.add_observation())
+    with caplog.at_level(logging.ERROR):
+        env.runner.run(FORECAST_ID, RECEIVED_AT)
+    job = env.jobs.get_job(FORECAST_ID)
+    assert job.status == "done"
+    assert job.summary is None
+    assert "書き込めない" in caplog.text
+
+
+def test_failedのジョブで要約の計算が例外を投げてもfailedのままで観測は書き換わらない(
+    summary_env, fake_summary, caplog
+):
+    env = summary_env
+    env.amedas.outcomes = [PermanentError("HTTP 400: bad")]
+    fake_summary.error = RuntimeError("計算できない")
+    env.ensure(env.add_observation())
+    # 以前の作り直しで入っていた答えが、失敗で消えたり書き換わったりしないことを確かめる
+    old_answer = {"result": "no_rain", "source": "open_meteo"}
+    env.observations.update_observation_fields(OBSERVATION_ID, {"answer": old_answer})
+    with caplog.at_level(logging.ERROR):
+        assert env.runner.run(LABEL_ID, LABEL_RUN_AT) == ("ran", None)
+    job = env.jobs.get_job(LABEL_ID)
+    assert job.status == "failed"
+    assert job.summary is None
+    assert job.completed_at == LABEL_RUN_AT
+    assert job.providers["amedas"].status == "failed"
+    assert env.observations.get_observation(OBSERVATION_ID)["answer"] == old_answer
+    assert LABEL_ID in caplog.text
+
+
+def test_doneのジョブで要約が失敗しても観測の既存の値は書き換わらない(summary_env, fake_summary):
+    env = summary_env
+    fake_summary.error = RuntimeError("計算できない")
+    env.ensure(env.add_observation())
+    old_weather = {**WEATHER_AT_CAPTURE, "category": "clear"}
+    env.observations.update_observation_fields(OBSERVATION_ID, {"weather_at_capture": old_weather})
+    env.runner.run(FORECAST_ID, RECEIVED_AT)
+    assert env.jobs.get_job(FORECAST_ID).status == "done"
+    assert env.observations.get_observation(OBSERVATION_ID)["weather_at_capture"] == old_weather

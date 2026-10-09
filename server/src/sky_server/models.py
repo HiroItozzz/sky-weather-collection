@@ -15,6 +15,15 @@ MAX_FUTURE = timedelta(minutes=10)
 Float = Annotated[float, Field(allow_inf_nan=False)]
 
 
+def to_utc_millis(t: datetime) -> str:
+    """時刻を UTC のミリ秒までの文字列（例 `2026-10-09T03:00:00.123Z`）にする。
+
+    文字列のまま並べると時刻順になる。
+    """
+    utc = t.astimezone(UTC)
+    return f"{utc:%Y-%m-%dT%H:%M:%S}.{utc.microsecond // 1000:03d}Z"
+
+
 class PrivacyZone(BaseModel):
     """公開版を作るときに隠す範囲（中心と半径）。サーバーが観測を受け取るときには使わない。"""
 
@@ -105,6 +114,7 @@ class ObservationMetadata(_Strict):
         return {
             **self.model_dump(mode="json"),
             "user_id": user_id,
+            "captured_at_utc": to_utc_millis(self.captured_at),
             "received_at": received_at.isoformat(),
             "image_key": image_key,
         }

@@ -1,5 +1,7 @@
 """Firestore を使う保存先（M4 の GCP 版）。"""
 
+from collections.abc import Iterator
+
 from google.api_core.exceptions import AlreadyExists
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -74,6 +76,27 @@ class FirestoreObservationRepository(ObservationRepository):
             filter=FieldFilter("user_id", "==", user_id)
         )
         return [snapshot.to_dict() for snapshot in query.stream()]
+
+    def update_observation_fields(self, observation_id: str, fields: dict) -> None:
+        self._client.collection(OBSERVATIONS).document(observation_id).update(fields)
+
+    def list_observations_page(
+        self, user_id: str, limit: int, before: tuple[str, str] | None
+    ) -> list[dict]:
+        # user_id 昇順・captured_at_utc 降順・observation_id 降順の複合インデックスが必要
+        query = (
+            self._client.collection(OBSERVATIONS)
+            .where(filter=FieldFilter("user_id", "==", user_id))
+            .order_by("captured_at_utc", direction=firestore.Query.DESCENDING)
+            .order_by("observation_id", direction=firestore.Query.DESCENDING)
+        )
+        if before is not None:
+            query = query.start_after({"captured_at_utc": before[0], "observation_id": before[1]})
+        return [snapshot.to_dict() for snapshot in query.limit(limit).stream()]
+
+    def list_all_observations(self) -> Iterator[dict]:
+        for snapshot in self._client.collection(OBSERVATIONS).stream():
+            yield snapshot.to_dict()
 
     def delete_observation(self, observation_id: str) -> None:
         self._client.collection(OBSERVATIONS).document(observation_id).delete()

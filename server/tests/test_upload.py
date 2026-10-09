@@ -16,6 +16,16 @@ def test_新規は201で画像とメタデータが保存される(api, token, d
     assert record["received_at"]
 
 
+def test_撮影時刻のUTCがミリ秒までのZ付きで保存される(api, token):
+    metadata = make_metadata()
+    metadata["captured_at"] = "2026-01-09T12:00:00.123456+09:00"
+    api.put(token, metadata)
+    record = api.repository.get_observation(OBSERVATION_ID)
+    assert record["captured_at_utc"] == "2026-01-09T03:00:00.123Z"
+    # 送られた値はそのまま残る
+    assert record["captured_at"] == "2026-01-09T12:00:00.123456+09:00"
+
+
 def test_再送は200で何も変えない(api, token):
     api.put(token)
     before = api.repository.get_observation(OBSERVATION_ID)

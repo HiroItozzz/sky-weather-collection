@@ -1,4 +1,4 @@
-"""管理用コマンド：撮影者の作成・無効化・削除、プライバシーゾーンと公開への同意、天気ジョブの実行。"""
+"""管理用コマンド：撮影者の作成・無効化・削除、プライバシーゾーンと公開への同意、天気ジョブの実行、要約の作り直し。"""
 
 import argparse
 import sys
@@ -13,9 +13,12 @@ from sky_server.jobs import (
     JobRepository,
     JobRunner,
     LocalTaskScheduler,
+    Summarizer,
+    _parse_time,
     default_fetchers,
+    save_summary,
 )
-from sky_server.models import PrivacyZone, User
+from sky_server.models import PrivacyZone, User, to_utc_millis
 from sky_server.storage import BlobStore, ObservationRepository
 from sky_server.weather.common import Clock, raw_key, utc_now
 
@@ -166,6 +169,44 @@ def run_due_jobs(
     return 1 if failed else 0
 
 
+def rebuild_summaries(
+    repository: ObservationRepository,
+    job_repository: JobRepository,
+    summarizer: Summarizer,
+) -> tuple[int, int]:
+    """すべての観測の `captured_at_utc` を補い、完了したジョブの要約を計算し直す。
+
+    1件の失敗で止めず、`(処理した観測の数, 失敗した観測の数)` を返す。
+    """
+    processed = failed = 0
+    for record in repository.list_all_observations():
+        processed += 1
+        observation_id = record["observation_id"]
+        try:
+            if "captured_at_utc" not in record:
+                captured_at_utc = to_utc_millis(_parse_time(record["captured_at"]))
+                repository.update_observation_fields(
+                    observation_id, {"captured_at_utc": captured_at_utc}
+                )
+            ok = True
+            for phase in PHASES:
+                job = job_repository.get_job(f"{observation_id}_{phase}")
+                if job is None or job.status not in ("done", "failed"):
+                    continue
+                # save_summary は失敗しても例外を投げないので、成功したかを summary で見分ける
+                save_summary(job, record, summarizer, repository)
+                job_repository.update_job(job)
+                ok = ok and job.summary is not None
+        except Exception as e:
+            print(f"{observation_id} error {type(e).__name__}: {e}", file=sys.stderr)
+            failed += 1
+        else:
+            if not ok:
+                print(f"{observation_id} error 要約を作れませんでした", file=sys.stderr)
+                failed += 1
+    return processed, failed
+
+
 def _latitude(text: str) -> float:
     return _in_range(text, "lat", -90, 90)
 
@@ -218,6 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     delete.add_argument("--user-id", required=True)
     delete.add_argument("--yes", action="store_true", help="確認なしで消す")
     sub.add_parser("run-due-jobs", help="期限の来た天気ジョブを実行する")
+    sub.add_parser("rebuild-summaries", help="天気の要約と撮影時刻（UTC）を作り直す")
     args = parser.parse_args(argv)
 
     try:
@@ -235,8 +277,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run-due-jobs":
         scheduler = backend.scheduler
         fetchers = default_fetchers(backend.weather_store)
-        runner = JobRunner(repository, backend.job_repository, scheduler, fetchers)
+        summarizer = Summarizer(backend.weather_store)
+        runner = JobRunner(
+            repository, backend.job_repository, scheduler, fetchers, summarizer=summarizer
+        )
         return run_due_jobs(scheduler, runner, datetime.now(UTC))
+    if args.command == "rebuild-summaries":
+        processed, failed = rebuild_summaries(
+            repository, backend.job_repository, Summarizer(backend.weather_store)
+        )
+        print(f"処理した観測: {processed} 件、失敗: {failed} 件")
+        return 1 if failed else 0
     if args.command == "create-user":
         user, token = create_user(repository, args.name)
         print(f"user_id: {user.user_id}")
