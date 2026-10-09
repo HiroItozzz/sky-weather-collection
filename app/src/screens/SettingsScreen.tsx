@@ -17,8 +17,9 @@ import type { QueueItem, QueueState, UploadQueue } from "../uploadQueue";
 import { warnOnFailure } from "../useUploadQueue";
 
 const CHECK_TIMEOUT_MS = 10_000;
-const URL_FORMAT_MESSAGE =
-  "サーバーの URL は、http://192.168.0.10:8000 のように、http:// か https:// で始めて、パスを付けずに入れてください。";
+const URL_FORMAT_MESSAGE = __DEV__
+  ? "サーバーの URL は、http://192.168.0.10:8000 のように、http:// か https:// で始めて、パスを付けずに入れてください。"
+  : "サーバーの URL は https:// で始めてください。";
 
 type Props = {
   queue: UploadQueue;
@@ -99,7 +100,7 @@ export default function SettingsScreen({ queue, queueState, onBack }: Props) {
   }, [reloadItems, queueState.pendingCount, queueState.running]);
 
   const onSave = async () => {
-    const normalized = normalizeServerUrl(serverUrl);
+    const normalized = normalizeServerUrl(serverUrl, { allowHttp: __DEV__ });
     if (normalized === null) {
       setFormMessage(URL_FORMAT_MESSAGE);
       return;
@@ -119,7 +120,7 @@ export default function SettingsScreen({ queue, queueState, onBack }: Props) {
   };
 
   const onCheck = async () => {
-    const normalized = normalizeServerUrl(serverUrl);
+    const normalized = normalizeServerUrl(serverUrl, { allowHttp: __DEV__ });
     if (normalized === null) {
       setFormMessage(URL_FORMAT_MESSAGE);
       return;
@@ -147,7 +148,7 @@ export default function SettingsScreen({ queue, queueState, onBack }: Props) {
     <View style={styles.container}>
       <View style={styles.header}>
         <Pressable onPress={onBack} style={styles.smallButton}>
-          <Text style={styles.buttonText}>撮影に戻る</Text>
+          <Text style={styles.buttonText}>← 撮影に戻る</Text>
         </Pressable>
       </View>
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">

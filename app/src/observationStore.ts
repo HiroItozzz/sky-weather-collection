@@ -2,8 +2,10 @@
 import * as Crypto from "expo-crypto";
 import { Directory, File, Paths } from "expo-file-system";
 import type { ExifInput } from "./exif";
-import { buildMetadata, type DeviceInfo, type ObservationMetadata } from "./metadata";
+import { buildMetadata, type DeviceInfo, type ObservationMetadata, type UserGuess } from "./metadata";
 import type { LocationInput, Sample } from "./record";
+import { shouldPurgeSent } from "./purge";
+import { makeThumbnailFor } from "./thumbnail";
 import type { QueueItem, Status, Store } from "./uploadQueue";
 
 const IMAGE_NAME = "image.jpg";
@@ -79,6 +81,21 @@ function listObservationDirs(): Directory[] {
   return root.list().filter((entry): entry is Directory => entry instanceof Directory);
 }
 
+/**
+ * 送信済みの画像を、サムネイルを作ってから消す（3 節）。
+ * サムネイルの作成に失敗しても、3〜6MB の画像を残し続けないように画像は消す。
+ */
+async function deleteImageWithThumbnail(id: string): Promise<void> {
+  const file = fileOf(id, IMAGE_NAME);
+  if (!file.exists) return;
+  try {
+    await makeThumbnailFor(id, file.uri);
+  } catch (e) {
+    console.warn("サムネイルの作成に失敗しました", e);
+  }
+  file.delete();
+}
+
 export const observationStore: Store = {
   async list(): Promise<QueueItem[]> {
     const items: QueueItem[] = [];
@@ -106,8 +123,7 @@ export const observationStore: Store = {
   },
 
   async deleteImage(id) {
-    const file = fileOf(id, IMAGE_NAME);
-    if (file.exists) file.delete();
+    await deleteImageWithThumbnail(id);
   },
 };
 
@@ -123,6 +139,8 @@ export type SaveCaptureInput = {
   width: number | null | undefined;
   height: number | null | undefined;
   device: DeviceInfo;
+  /** シャッターを押した時点の予想 */
+  userGuess: UserGuess | null;
 };
 
 /**
@@ -153,6 +171,7 @@ export async function saveCapture(input: SaveCaptureInput): Promise<ObservationM
       height: input.height,
       device: input.device,
       imageSha256: toHex(digest),
+      userGuess: input.userGuess,
     });
     await writeAtomically(input.observationId, METADATA_NAME, JSON.stringify(metadata));
     return metadata;
@@ -183,5 +202,26 @@ export async function cleanupIncomplete(nowMs: number = Date.now()): Promise<voi
     // 時刻がわからないものは、保存の最中かもしれないので消さない
     if (times.length === 0) continue;
     if (nowMs - Math.max(...times) >= STALE_MS) dir.delete();
+  }
+}
+
+/**
+ * 起動時の掃除（送信済みの分）。
+ * - sent なのに image.jpg が残っているもの（サムネイルを作る前に落ちたもの）は、サムネイルを作ってから画像を消す
+ * - sent_at から 30 日以上たった sent は、ディレクトリごと消す（1.2 節）
+ * 1 件の失敗で残りを止めないように、ディレクトリごとに失敗を警告に出して続ける。
+ */
+export async function cleanupSent(nowMs: number = Date.now()): Promise<void> {
+  for (const dir of listObservationDirs()) {
+    try {
+      const id = dir.name;
+      // status.json がなければ pending とみなされ、対象にならない
+      const status = await readStatus(id);
+      if (status.state !== "sent") continue;
+      await deleteImageWithThumbnail(id);
+      if (shouldPurgeSent(status, nowMs)) dir.delete();
+    } catch (e) {
+      console.warn("送信済みのデータの掃除に失敗しました", e);
+    }
   }
 }

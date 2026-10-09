@@ -5,7 +5,11 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import Constants from "expo-constants";
 import { randomUUID } from "expo-crypto";
 import * as Device from "expo-device";
+import { createApiClient } from "../api";
+import { weatherSummary } from "../format";
+import type { UserGuess } from "../metadata";
 import { toTrueAzimuth } from "../orientation";
+import { pollWeather } from "../pollWeather";
 import type { Sample } from "../record";
 import { saveCapture } from "../observationStore";
 import { loadSettings, type Settings } from "../settings";
@@ -22,6 +26,34 @@ const STALE_LOCATION_SEC = 60;
 /** 地磁気の実測が WMM の全磁力からこの割合以上ずれたら、キャリブレーションを促す */
 const MAGNETIC_DEVIATION_RATIO = 0.2;
 const SAVED_MESSAGE_MS = 2000;
+/** 撮影時の天気を問い合わせる間隔と、あきらめるまでの時間（ミリ秒） */
+const WEATHER_POLL_INTERVAL_MS = 5000;
+const WEATHER_POLL_TIMEOUT_MS = 60_000;
+
+const GUESS_OPTIONS: { value: UserGuess | null; label: string }[] = [
+  { value: "rain", label: "降る" },
+  { value: "no_rain", label: "降らない" },
+  { value: null, label: "わからない" },
+];
+
+/** ミリ秒待つ。signal が止まったらすぐ戻る。 */
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 /** 小数第1位まで。値がないときは「--」 */
 function fmt(value: number | null | undefined, unit = ""): string {
@@ -39,9 +71,17 @@ type Props = {
   queue: UploadQueue;
   queueState: QueueState;
   onOpenSettings: () => void;
+  onOpenTimeline: () => void;
+  onOpenStats: () => void;
 };
 
-export default function CaptureScreen({ queue, queueState, onOpenSettings }: Props) {
+export default function CaptureScreen({
+  queue,
+  queueState,
+  onOpenSettings,
+  onOpenTimeline,
+  onOpenStats,
+}: Props) {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const { view, model, motionAvailable, locationGranted, getSamplesAround, getLatest } =
     useSensors();
@@ -53,6 +93,20 @@ export default function CaptureScreen({ queue, queueState, onOpenSettings }: Pro
   const [showDetails, setShowDetails] = useState(false);
   // 二度押しを同期的にはじくためのフラグ（状態の更新は待たない）
   const shootingRef = useRef(false);
+  const [guess, setGuess] = useState<UserGuess | null>(null);
+  const [weatherText, setWeatherText] = useState<string | null>(null);
+  // 撮影時の天気の問い合わせを止めるためのもの。次のシャッターと画面を離れたときに止める
+  const pollAbortRef = useRef<AbortController | null>(null);
+  const unmountedRef = useRef(false);
+  const api = useRef(createApiClient(fetch)).current;
+
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      pollAbortRef.current?.abort();
+    };
+  }, []);
 
   // 設定の画面から戻ったときに読み直すため、この画面を開くたびに読む
   useEffect(() => {
@@ -96,11 +150,38 @@ export default function CaptureScreen({ queue, queueState, onOpenSettings }: Pro
     coords !== undefined && (coords.accuracy === null || coords.accuracy <= 0);
   const locationStale = view.locationAgeSec !== null && view.locationAgeSec >= STALE_LOCATION_SEC;
 
+  /** 保存した観測の撮影時の天気を、取れるまで問い合わせて表示する（5 節）。 */
+  const showWeatherWhenReady = async (observationId: string) => {
+    if (unmountedRef.current) return;
+    const current = await loadSettings();
+    if (current.serverUrl === "" || current.inviteCode === "") return;
+    const controller = new AbortController();
+    // 保存の最中に次のシャッターが押されることはない（saving の間は押せない）
+    pollAbortRef.current = controller;
+    const weather = await pollWeather({
+      get: async () => api.getObservation(await loadSettings(), observationId),
+      sleep: abortableSleep,
+      now: Date.now,
+      intervalMs: WEATHER_POLL_INTERVAL_MS,
+      timeoutMs: WEATHER_POLL_TIMEOUT_MS,
+      signal: controller.signal,
+    });
+    if (weather !== null && !controller.signal.aborted) {
+      setWeatherText(`撮影時の天気：${weatherSummary(weather)}`);
+    }
+  };
+
   const onShutter = async () => {
     const camera = cameraRef.current;
     if (shootingRef.current || camera === null || !canShoot) return;
     shootingRef.current = true;
     const pressedAtMs = Date.now();
+    // 予想は押した時点で固定し、次の1枚に持ち越さないように「わからない」へ戻す
+    const userGuess = guess;
+    setGuess(null);
+    pollAbortRef.current?.abort();
+    pollAbortRef.current = null;
+    setWeatherText(null);
     setSaving(true);
     setMessage(null);
     try {
@@ -121,8 +202,9 @@ export default function CaptureScreen({ queue, queueState, onOpenSettings }: Pro
       ]);
 
       const { location, headingAccuracy } = getLatest();
+      const observationId = randomUUID();
       await saveCapture({
-        observationId: randomUUID(),
+        observationId,
         cachedUri: picture.uri,
         pressedAtMs,
         samples,
@@ -137,10 +219,12 @@ export default function CaptureScreen({ queue, queueState, onOpenSettings }: Pro
           model: Device.modelName,
           app_version: Constants.expoConfig?.version ?? null,
         },
+        userGuess,
       });
       setMessage(`保存しました（撮影 ${elapsedMs} ms）`);
       // 保存の完了後に件数を数え直し、送信を始める
       warnOnFailure(queue.refresh().then(() => queue.runNow()), "撮影後の送信");
+      warnOnFailure(showWeatherWhenReady(observationId), "撮影時の天気の取得");
     } catch (e) {
       console.warn("保存に失敗しました", e);
       const reason = e instanceof Error ? e.message : String(e);
@@ -172,6 +256,17 @@ export default function CaptureScreen({ queue, queueState, onOpenSettings }: Pro
       </View>
 
       <View style={styles.panel}>
+        <View style={styles.navRow}>
+          <Pressable onPress={onOpenTimeline} style={styles.navButton}>
+            <Text style={styles.buttonText}>タイムライン</Text>
+          </Pressable>
+          <Pressable onPress={onOpenStats} style={styles.navButton}>
+            <Text style={styles.buttonText}>記録</Text>
+          </Pressable>
+          <Pressable onPress={onOpenSettings} style={styles.navButton}>
+            <Text style={styles.buttonText}>設定</Text>
+          </Pressable>
+        </View>
         <View style={styles.topRow}>
           <View style={styles.values}>
             <Text style={styles.line}>方位角（真北）: {fmt(trueAzimuth, "°")}</Text>
@@ -260,7 +355,20 @@ export default function CaptureScreen({ queue, queueState, onOpenSettings }: Pro
 
       <View style={styles.bottom} pointerEvents="box-none">
         {message !== null ? <Text style={styles.message}>{message}</Text> : null}
+        {weatherText !== null ? <Text style={styles.message}>{weatherText}</Text> : null}
         {hint !== null ? <Text style={styles.message}>{hint}</Text> : null}
+        <Text style={styles.message}>1時間後に、ここで雨が降ると思いますか？</Text>
+        <View style={styles.guessRow}>
+          {GUESS_OPTIONS.map((option) => (
+            <Pressable
+              key={option.label}
+              onPress={() => setGuess(option.value)}
+              style={[styles.guessButton, guess === option.value && styles.guessSelected]}
+            >
+              <Text style={styles.buttonText}>{option.label}</Text>
+            </Pressable>
+          ))}
+        </View>
         <Pressable
           onPress={onShutter}
           disabled={!canShoot}
@@ -290,6 +398,23 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: "rgba(0,0,0,0.55)",
   },
+  navRow: { flexDirection: "row", gap: 8, marginBottom: 6 },
+  navButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: "#1976d2",
+  },
+  guessRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
+  guessButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    borderWidth: 2,
+    borderColor: "#607d8b",
+  },
+  guessSelected: { backgroundColor: "#1976d2", borderColor: "#fff" },
   topRow: { flexDirection: "row", justifyContent: "space-between" },
   values: { flexShrink: 1 },
   actions: { alignItems: "flex-end" },

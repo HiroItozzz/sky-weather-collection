@@ -3,6 +3,8 @@
 import { parseCameraExif, type CameraMetadata, type ExifInput } from "./exif";
 import { buildRecord, type LocationInput, type Sample, type SensorRecord } from "./record";
 
+export type UserGuess = "rain" | "no_rain";
+
 export type DeviceInfo = {
   platform: "android" | "ios";
   os_version: string | null;
@@ -25,6 +27,8 @@ export type MetadataInput = {
   height: number | null | undefined;
   device: DeviceInfo;
   imageSha256: string;
+  /** シャッターを押した時点の予想。答えなかったときは null */
+  userGuess: UserGuess | null;
 };
 
 export type ObservationMetadata = {
@@ -48,7 +52,7 @@ export type ObservationMetadata = {
     app_version: string;
   };
   capture_path: "native";
-  user_guess: null;
+  user_guess: UserGuess | null;
   image_sha256: string;
 };
 
@@ -87,7 +91,7 @@ export function buildMetadata(input: MetadataInput): ObservationMetadata {
       app_version: orUnknown(input.device.app_version),
     },
     capture_path: "native",
-    user_guess: null,
+    user_guess: input.userGuess,
     image_sha256: input.imageSha256,
   };
 }

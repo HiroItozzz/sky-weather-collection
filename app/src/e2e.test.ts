@@ -106,6 +106,7 @@ function makeMetadataJson(id: string, bytes: Uint8Array, pressedAtMs: number): s
     height: 8,
     device: { platform: "android", os_version: "14", model: "e2e", app_version: "0.0.0" },
     imageSha256: sha256(bytes),
+    userGuess: null,
   });
   return JSON.stringify(metadata);
 }
