@@ -137,6 +137,6 @@ def test_認証を引数で渡せる(data_dir, monkeypatch):
 
 
 def test_SKY_TASK_AUTHが不明な値なら起動時にエラー(data_dir, monkeypatch):
-    monkeypatch.setenv("SKY_TASK_AUTH", "oidc")
+    monkeypatch.setenv("SKY_TASK_AUTH", "bogus")
     with pytest.raises(ValueError, match="SKY_TASK_AUTH"):
         create_app(data_dir)

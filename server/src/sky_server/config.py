@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_DATA_DIR = "./data"
@@ -24,3 +25,51 @@ def get_amedas_interval_s() -> float:
 
 def get_open_meteo_url() -> str:
     return os.environ.get("SKY_OPEN_METEO_URL", DEFAULT_OPEN_METEO_URL)
+
+
+class ConfigError(ValueError):
+    """設定の値が正しくない、または必須の設定が足りないときのエラー。"""
+
+
+BACKENDS = ("local", "gcp")
+DEFAULT_TASKS_LOCATION = "us-central1"
+DEFAULT_TASKS_QUEUE = "weather-fetch"
+
+
+def get_backend_name() -> str:
+    """使う版。`SKY_BACKEND` の `local`（既定）か `gcp`。それ以外はエラー。"""
+    name = os.environ.get("SKY_BACKEND", "local")
+    if name not in BACKENDS:
+        raise ConfigError(
+            f"SKY_BACKEND の値が正しくありません: {name!r}（使えるのは local と gcp です）"
+        )
+    return name
+
+
+@dataclass(frozen=True)
+class GcpSettings:
+    project: str
+    bucket: str
+    tasks_location: str
+    tasks_queue: str
+    tasks_target_url: str
+    tasks_service_account: str
+
+
+def get_gcp_settings() -> GcpSettings:
+    """GCP 版の設定を読む。必須の値が足りなければ、足りない名前をすべて示してエラーにする。"""
+    required = {
+        "project": "SKY_GCP_PROJECT",
+        "bucket": "SKY_GCS_BUCKET",
+        "tasks_target_url": "SKY_TASKS_TARGET_URL",
+        "tasks_service_account": "SKY_TASKS_SERVICE_ACCOUNT",
+    }
+    values = {key: os.environ.get(name, "") for key, name in required.items()}
+    missing = [name for key, name in required.items() if not values[key]]
+    if missing:
+        raise ConfigError(f"GCP 版に必要な設定が足りません: {', '.join(missing)}")
+    return GcpSettings(
+        tasks_location=os.environ.get("SKY_TASKS_LOCATION") or DEFAULT_TASKS_LOCATION,
+        tasks_queue=os.environ.get("SKY_TASKS_QUEUE") or DEFAULT_TASKS_QUEUE,
+        **values,
+    )

@@ -203,12 +203,19 @@ def test_二重の配達は無視して取り直さない(env):
     assert env.jobs.get_job(FORECAST_ID).attempts == 1
 
 
-def test_期限前は実行しない(env):
+def test_余裕の2分より前なら実行しない(env):
     env.ensure(env.add_observation())
-    just_before = LABEL_RUN_AT - timedelta(seconds=1)
-    assert env.runner.run(LABEL_ID, just_before) == ("ignored", "not_due")
+    too_early = LABEL_RUN_AT - timedelta(minutes=2) - timedelta(seconds=1)
+    assert env.runner.run(LABEL_ID, too_early) == ("ignored", "not_due")
     assert env.open_meteo.calls == []
     assert env.jobs.get_job(LABEL_ID).attempts == 0
+
+
+def test_予定の2分前までなら早く届いても実行する(env):
+    env.ensure(env.add_observation())
+    assert env.runner.run(LABEL_ID, LABEL_RUN_AT - timedelta(minutes=2)) == ("ran", None)
+    assert len(env.open_meteo.calls) == 1
+    assert env.jobs.get_job(LABEL_ID).status == "done"
 
 
 def test_ちょうど期限なら実行する(env):

@@ -26,6 +26,8 @@ PHASE_PROVIDERS = {
 # ラベルは、アメダスの10分値が公開されるまでの遅れと Open-Meteo の更新の余裕を見て
 # 撮影のこれだけ後に取る
 LABEL_DELAY = timedelta(hours=3, minutes=30)
+# Cloud Tasks とサーバーの時計のずれで、予約より少し早く届いても実行する
+DUE_MARGIN = timedelta(minutes=2)
 MAX_ATTEMPTS = 6
 BASE_WAIT = timedelta(minutes=5)
 MAX_WAIT = timedelta(hours=2)
@@ -245,7 +247,7 @@ class JobRunner:
             return "ignored", "job_not_found"
         if job.status != "pending":
             return "ignored", "already_finished"
-        if now < job.next_attempt_at:
+        if now < job.next_attempt_at - DUE_MARGIN:
             if not job.enqueued:
                 _enqueue(job, self._jobs, self._scheduler)
             return "ignored", "not_due"

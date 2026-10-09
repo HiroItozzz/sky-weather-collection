@@ -6,13 +6,14 @@ import uuid
 from datetime import UTC, datetime
 
 from sky_server.auth import generate_token, hash_token
-from sky_server.config import get_data_dir
-from sky_server.jobs import JobRunner, LocalJobRepository, LocalTaskScheduler, default_fetchers
+from sky_server.backends import build_backend
+from sky_server.config import ConfigError, get_backend_name, get_data_dir
+from sky_server.jobs import JobRunner, LocalTaskScheduler, default_fetchers
 from sky_server.models import User
-from sky_server.storage import LocalBlobStore, LocalObservationRepository
+from sky_server.storage import ObservationRepository
 
 
-def create_user(repository: LocalObservationRepository, name: str) -> tuple[User, str]:
+def create_user(repository: ObservationRepository, name: str) -> tuple[User, str]:
     token = generate_token()
     user = User(
         user_id=str(uuid.uuid4()),
@@ -24,7 +25,7 @@ def create_user(repository: LocalObservationRepository, name: str) -> tuple[User
     return user, token
 
 
-def revoke_user(repository: LocalObservationRepository, user_id: str) -> User | None:
+def revoke_user(repository: ObservationRepository, user_id: str) -> User | None:
     try:
         uuid.UUID(user_id)
     except ValueError:
@@ -68,12 +69,22 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("run-due-jobs", help="期限の来た天気ジョブを実行する")
     args = parser.parse_args(argv)
 
-    data_dir = get_data_dir()
-    repository = LocalObservationRepository(data_dir)
+    try:
+        if args.command == "run-due-jobs" and get_backend_name() == "gcp":
+            print(
+                "run-due-jobs は SKY_BACKEND=gcp では使えません（Cloud Tasks が実行します）",
+                file=sys.stderr,
+            )
+            return 1
+        backend = build_backend(get_data_dir())
+    except ConfigError as e:
+        print(e, file=sys.stderr)
+        return 1
+    repository = backend.repository
     if args.command == "run-due-jobs":
-        scheduler = LocalTaskScheduler(data_dir)
-        fetchers = default_fetchers(LocalBlobStore(data_dir, "weather"))
-        runner = JobRunner(repository, LocalJobRepository(data_dir), scheduler, fetchers)
+        scheduler = backend.scheduler
+        fetchers = default_fetchers(backend.weather_store)
+        runner = JobRunner(repository, backend.job_repository, scheduler, fetchers)
         return run_due_jobs(scheduler, runner, datetime.now(UTC))
     if args.command == "create-user":
         user, token = create_user(repository, args.name)
