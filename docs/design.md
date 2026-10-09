@@ -50,7 +50,7 @@
 ```
 docs/        設計メモ、API仕様
 server/      FastAPI（Cloud Run 用）
-app/         スマホアプリ（方式は未決。6節を参照）
+app/         スマホアプリ（Expo）
 ml/          学習用のコードとノートブック
 ```
 
@@ -93,13 +93,10 @@ ml/          学習用のコードとノートブック
 
 ## 6. スマホアプリ
 
-**方式は未決。** 候補と比較は次のとおり。
-
-| 方式 | 長所 | 短所 |
-|---|---|---|
-| Expo（React Native） | 1つのコード（TypeScript）で Android と iOS の両方に出せる。EXIF を取れる。Mac がなくても EAS Build で iOS 版をビルドできる | 端末の向きを取る精度は検証が必要。足りなければ、その部分だけネイティブのモジュールを書く |
-| Kotlin（Android ネイティブ） | センサーやカメラを最も細かく扱える | iOS 版は Swift で書き直しになり、Mac が必要 |
-| Web アプリ | URL を送るだけで配れて、費用は0円 | カメラの情報が取れない。iOS では端末に保存したデータが消えることがある |
+- Expo（React Native、TypeScript）で作る。1つのコードで Android と iOS の両方に出せて、Mac がなくても EAS Build で iOS 版をビルドできるため。
+- 最初は Android だけで動かす。ストアでの公開も Android（Google Play）から始める。iOS は Apple Developer Program に加入してから対応する。
+- Expo では端末の向きの精度を検証する必要がある（M2）。足りなければ、その部分だけネイティブのモジュール（Kotlin）を書いて組み込む。
+- 検討して採らなかった方式：Kotlin のみ（iOS 版を Swift で書き直すことになり、Mac も必要）、Web アプリ（カメラの情報が取れず、iOS では端末に保存したデータが消えることがある）、Flutter（Dart を新たに学ぶ必要があり、向きを取るプラグインも弱い）。
 
 アプリの方式にかかわらず、次の点は共通にする。
 
@@ -150,7 +147,7 @@ ml/          学習用のコードとノートブック
 
 ## 9. 収集を続けてもらうための仕掛け
 
-盛り込みすぎないよう、次の3つに絞る。
+ストアで公開するなら、使う人にとってのメリットや楽しさが欠かせない。中身は検討中で、当面は次の3つを入れる。
 
 1. 撮影直後に、現在の天気APIの値を表示する。
 2. 予想ゲーム：撮影時に「1時間後に降るか」を答えてもらい、ラベルが付いたら答え合わせをする。回答は人間の予想として、比較対象にもなる。
@@ -171,6 +168,67 @@ ml/          学習用のコードとノートブック
 
 ## 11. 未決事項
 
-- スマホアプリの方式（6節）
+- ストアで公開するときに、使う人に提供するメリットや楽しさ（9節）
 - 予測対象の時間幅を60分以外にも広げるか（ラベル用の生データは保存してあるので、後から変えられる）
 - Apple Developer Program に加入する時期
+
+## 12. M1 の仕様：アップロード API（ローカル版）
+
+M1 では、7節の API のうち天気データの取得以外を、ローカルで動く形で作る。GCP のサービス（Firestore、Cloud Storage、Cloud Tasks）は M4 で対応する。そのときに差し替えられるよう、保存先はインターフェースで分けておく。
+
+### 構成
+
+- `server/` に置く。Python 3.13、パッケージ管理は uv。
+- 依存パッケージ：fastapi、uvicorn、pydantic v2、python-multipart。開発用に pytest、httpx、ruff。
+- パッケージ名は `sky_server`。
+- 保存先のインターフェース
+  - `ObservationRepository`：撮影者と観測（メタデータ）の保存。M1 ではローカル版を作る（JSON ファイル。1件1ファイル）。
+  - `BlobStore`：画像の保存。M1 ではローカルのディレクトリ版を作る。
+  - データの置き場所は、環境変数 `SKY_DATA_DIR` で指定する。
+- 写真は元の画像のまま（EXIF 付き）保存する。EXIF を消すのは公開版を作るときだけ。
+
+### 撮影者と招待コード
+
+- 撮影者のデータ：`user_id`（UUID）、`name`、`token_hash`、`created_at`、`revoked_at`（null なら有効）、`consent_public`（初期値 false）。
+- 招待コードは `secrets.token_urlsafe(32)` で生成する。サーバーには SHA-256 のハッシュ（16進数）だけを保存する。コードは十分に長いランダムな文字列なので、パスワード用の遅いハッシュは不要。
+- 管理用のコマンド：`uv run python -m sky_server.admin create-user --name <名前>` で撮影者を作り、コードを1回だけ表示する。`revoke-user --user-id <ID>` で無効にする。
+- 認証の失敗（ヘッダーがない、コードが違う、無効にされた）はすべて 401 を返す。
+
+### `PUT /v1/observations/{observation_id}`
+
+- `observation_id` は UUID の形式（大文字小文字は問わず、小文字に正規化して扱う）。形式が違えば 422。
+- multipart のパート：`metadata`（JSON 文字列）、`image`（`image/jpeg`）。
+- metadata は4節の項目を pydantic で検証する。検証に失敗したら 422。
+  - `schema_version` は 1 のみ受け付ける。
+  - `observation_id` はパスの ID と一致しなければならない。
+  - `captured_at` はタイムゾーン付きの時刻にする。サーバー時刻より10分以上未来なら 422。
+  - 値の範囲：`lat` -90〜90、`lon` -180〜180、`azimuth_deg` 0 以上 360 未満、`pitch_deg` -90〜90、`roll_deg` -180〜180、`accuracy_m` 0 以上。
+  - `orientation.accuracy` は `high` / `medium` / `low` / `unreliable` / null。
+  - `device.platform` は `android` / `ios` / `web`。`capture_path` は `native` / `web`。
+  - `user_guess` は `rain` / `no_rain` / null。
+  - 4節で null を許す項目：`location.altitude_m`、`orientation` の各値、`camera` の各値、`user_guess`。`location` と `orientation` そのものも null を許す。
+  - 知らない項目が来たら 422 にする（つづりの間違いに気づくため）。
+- 画像の大きさの上限は 10MB。超えたら 413。
+- 受け取った画像の SHA-256 が `image_sha256` と一致しなければ 422。
+- 重複の扱い
+  - 同じ ID で、同じ撮影者・同じ `image_sha256` の観測がすでにあれば、何も変えずに 200 を返す（再送とみなす）。
+  - 同じ ID で、撮影者か `image_sha256` が違えば 409。
+  - 新規なら保存して 201。
+- サーバーが付け加えて保存する項目：`user_id`、`received_at`（UTC）。
+- 応答の本文：`{"observation_id": "...", "status": "created"}`（200 のときは `"exists"`）。
+
+### `GET /v1/observations/{observation_id}`
+
+- 自分の観測なら `{"observation_id": "...", "received_at": "..."}` を返す。
+- 存在しないとき、または他人の観測のときは、どちらも 404 を返す（他人の ID が存在するかどうかを漏らさないため）。
+
+### `GET /healthz`
+
+- 認証なしで `{"status": "ok"}` を返す。
+
+### 完成条件
+
+- `cd server && uv run pytest` がすべて通る。
+- `uv run ruff check` と `uv run ruff format --check` が通る。
+- 上に挙げた応答コードのそれぞれについて、テストがある（201、再送の 200、409 が2通り、401 が3通り、413、422（ハッシュの不一致、ID の不一致、範囲外の値、知らない項目））。また、GET で他人の観測が 404 になることのテストもある。
+- `server/README.md` に、ローカルでの起動方法、撮影者の作り方、curl でアップロードを試す例を書く。
