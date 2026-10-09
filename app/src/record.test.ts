@@ -128,6 +128,21 @@ describe("buildRecord", () => {
     expect(r.orientation?.azimuth_deg).toBe(0);
   });
 
+  it("方位角は小数第2位ちょうどになる（剰余の丸め誤差が残らない）", () => {
+    const decl = magneticModel(35.6812362, 139.7671248, 45.65, new Date(PRESSED)).declinationDeg;
+    const az = (172.08 - decl) * (Math.PI / 180);
+    const s = Math.sin(az);
+    const c = Math.cos(az);
+    const R: Mat3 = [c, 0, -s, -s, 0, -c, 0, 1, 0];
+    const r = buildRecord({
+      pressedAtMs: PRESSED,
+      samples: [{ t: PRESSED, R }],
+      location: location(),
+      headingAccuracy: 3,
+    });
+    expect(r.orientation?.azimuth_deg).toBe(172.08);
+  });
+
   it("accuracy の対応づけ", () => {
     const acc = (v: number | null) =>
       buildRecord({
