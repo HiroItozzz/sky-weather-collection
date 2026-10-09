@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { addNetworkStateListener, getNetworkStateAsync } from "expo-network";
-import { cleanupIncomplete, observationStore } from "./observationStore";
+import { cleanupIncomplete, cleanupSent, observationStore } from "./observationStore";
 import { loadSettings } from "./settings";
 import { createFetchTransport } from "./transport";
 import { createUploadQueue, type QueueState, type UploadQueue } from "./uploadQueue";
@@ -41,6 +41,10 @@ export function useUploadQueue(): { queue: UploadQueue; state: QueueState } {
       cleanupIncomplete()
         .catch((e: unknown) => {
           console.warn("保存の途中で残ったデータの掃除に失敗しました", e);
+        })
+        .then(() => cleanupSent())
+        .catch((e: unknown) => {
+          console.warn("送信済みのデータの掃除に失敗しました", e);
         })
         .then(() => queue.runNow()),
       "起動時の送信",

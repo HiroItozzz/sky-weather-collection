@@ -148,7 +148,7 @@ export default function SettingsScreen({ queue, queueState, onBack }: Props) {
     <View style={styles.container}>
       <View style={styles.header}>
         <Pressable onPress={onBack} style={styles.smallButton}>
-          <Text style={styles.buttonText}>撮影に戻る</Text>
+          <Text style={styles.buttonText}>← 撮影に戻る</Text>
         </Pressable>
       </View>
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
