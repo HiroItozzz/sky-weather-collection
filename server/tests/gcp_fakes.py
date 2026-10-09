@@ -1,12 +1,14 @@
 """GCP のクライアントの偽物。コードが使う範囲だけを真似る。"""
 
 from google.api_core.exceptions import AlreadyExists, NotFound
+from google.cloud import firestore
 
 
 class FakeSnapshot:
-    def __init__(self, data: dict | None) -> None:
+    def __init__(self, data: dict | None, reference: "FakeDocument | None" = None) -> None:
         self.exists = data is not None
         self._data = data
+        self.reference = reference
 
     def to_dict(self) -> dict | None:
         return None if self._data is None else dict(self._data)
@@ -22,11 +24,24 @@ class FakeDocument:
             raise AlreadyExists("すでにあります")
         self._docs[self._id] = dict(data)
 
-    def set(self, data: dict) -> None:
-        self._docs[self._id] = dict(data)
+    def set(self, data: dict, merge: bool = False) -> None:
+        if not merge:
+            self._docs[self._id] = dict(data)
+            return
+        # merge=True では、渡した項目だけを書き換える。Increment は今の値に足す
+        doc = self._docs.setdefault(self._id, {})
+        for key, value in data.items():
+            if isinstance(value, firestore.Increment):
+                doc[key] = doc.get(key, 0) + value.value
+            else:
+                doc[key] = value
 
     def get(self) -> FakeSnapshot:
         return FakeSnapshot(self._docs.get(self._id))
+
+    def delete(self) -> None:
+        # 本物の Firestore と同じく、ないドキュメントを消してもエラーにならない
+        self._docs.pop(self._id, None)
 
 
 class FakeQuery:
@@ -44,8 +59,8 @@ class FakeQuery:
 
     def stream(self):
         found = [
-            FakeSnapshot(data)
-            for data in self._docs.values()
+            FakeSnapshot(data, FakeDocument(self._docs, doc_id))
+            for doc_id, data in self._docs.items()
             if data.get(self._filter.field_path) == self._filter.value
         ]
         return iter(found[: self._limit])
@@ -69,6 +84,10 @@ class FakeBlob:
         self._objects = objects
         self._name = name
 
+    @property
+    def name(self) -> str:
+        return self._name
+
     def upload_from_string(self, data: bytes) -> None:
         self._objects[self._name] = data
 
@@ -77,6 +96,11 @@ class FakeBlob:
             raise NotFound("ありません")
         return self._objects[self._name]
 
+    def delete(self) -> None:
+        if self._name not in self._objects:
+            raise NotFound("ありません")
+        del self._objects[self._name]
+
 
 class FakeBucket:
     def __init__(self, objects: dict) -> None:
@@ -84,6 +108,9 @@ class FakeBucket:
 
     def blob(self, name: str) -> FakeBlob:
         return FakeBlob(self._objects, name)
+
+    def list_blobs(self, prefix: str = "") -> list[FakeBlob]:
+        return [FakeBlob(self._objects, name) for name in self._objects if name.startswith(prefix)]
 
 
 class FakeStorageClient:

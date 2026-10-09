@@ -22,6 +22,33 @@ uv run python -m sky_server.admin revoke-user --user-id <user_id>
 
 `create-user` は `user_id` と招待コードを表示する。招待コードはこのときの1回しか表示されない。サーバーにはそのハッシュだけが保存される。
 
+### プライバシーゾーン、公開への同意、データの削除
+
+`docs/design.md` の 8節で「最初から用意しておくもの」とした操作。仕様は `docs/server-security.md` の 4節にある。
+
+```sh
+# プライバシーゾーン（公開版を作るときに、この範囲で撮った写真の位置を消す）
+uv run python -m sky_server.admin add-privacy-zone --user-id <user_id> --lat 35.68 --lon 139.76 --radius-m 500 --label 自宅
+uv run python -m sky_server.admin list-privacy-zones --user-id <user_id>
+uv run python -m sky_server.admin delete-privacy-zone --user-id <user_id> --zone-id <zone_id>
+
+# 公開データに含めてよいかの同意
+uv run python -m sky_server.admin set-consent --user-id <user_id> --public yes
+
+# 撮影者と、その観測・画像・天気データ・ジョブをすべて消す（--yes がなければ件数を表示するだけ）
+uv run python -m sky_server.admin delete-user --user-id <user_id>
+uv run python -m sky_server.admin delete-user --user-id <user_id> --yes
+```
+
+`delete-user --yes` は2段階で消す（`docs/server-security.md` 7.3節）。1回目で撮影者を無効にして観測・画像・天気データ・ジョブを消し、撮影者そのものは残す。実行中だった天気ジョブがあとから書き戻すことがあるので、10分以上おいてもう一度実行すると、残りを消してから撮影者を消す。途中で失敗したときも、もう一度実行すれば残りを消せる。
+
+観測の記録より前に失敗したアップロードの画像など、撮影者からたどれない残骸は消えずに残ることがある。
+
+### 送信の上限と検査
+
+- 撮影者ごとに、1日（UTC）に新しく受け付ける観測は `SKY_DAILY_UPLOAD_LIMIT` 件（既定 100）まで。超えると 429 を返す。再送（すでにある観測）は上限を超えていても受け付ける。
+- アップロードは、本文を読む前に大きさ（Content-Length が 11MB を超えたら 413）と招待コード（401）を確かめる。
+
 ## curl でアップロードを試す
 
 `TOKEN` に `create-user` で表示された招待コードを入れる。
@@ -94,7 +121,13 @@ curl -i -X POST http://localhost:8000/internal/tasks/fetch-weather \
   -d "{\"job_id\": \"${ID}_forecast\"}"
 ```
 
-期限前のジョブは実行されず、`{"result": "ignored", "reason": "not_due", ...}` が返る。`SKY_TASK_AUTH` に `none` 以外の値を入れると起動時にエラーになる。
+期限前のジョブは実行されず、`{"result": "ignored", "reason": "not_due", ...}` が返る。
+
+`SKY_TASK_AUTH` の値は次のとおり。これ以外の値を入れると起動時にエラーになる。
+
+- 未設定：内部 API をすべて 401 にする（既定）。
+- `none`：認証を外す。ローカルで試すときだけ使う。`SKY_BACKEND=gcp` と組み合わせると起動時にエラーになる。
+- `oidc`：Cloud Tasks の OIDC トークンを検証する（GCP 版）。
 
 ### 設定（環境変数）
 
@@ -104,7 +137,8 @@ curl -i -X POST http://localhost:8000/internal/tasks/fetch-weather \
 | `SKY_AMEDAS_ENABLED` | `1` | `0` でアメダスを取得しない（ジョブの中では `disabled` になる） |
 | `SKY_AMEDAS_INTERVAL_S` | `1` | アメダスの呼び出しの間隔（秒） |
 | `SKY_OPEN_METEO_URL` | `https://api.open-meteo.com/v1/forecast` | Open-Meteo の URL |
-| `SKY_TASK_AUTH` | （なし＝すべて拒否） | `none` で内部 API の認証を外す（ローカル専用） |
+| `SKY_TASK_AUTH` | （なし＝すべて拒否） | 内部 API の認証。`none`（ローカル専用）か `oidc`（GCP 版） |
+| `SKY_DAILY_UPLOAD_LIMIT` | `100` | 撮影者ごとの1日（UTC）の新規の観測の上限。超えたら 429 |
 
 ### 生レスポンスの置き場所
 

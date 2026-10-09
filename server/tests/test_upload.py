@@ -72,7 +72,7 @@ def test_画像が10MBを超えたら413(api, token):
 
 
 def test_画像がちょうど10MBなら受け付ける(api, token):
-    exact = b"\xff" * (10 * 1024 * 1024)
+    exact = IMAGE + b"\xff" * (10 * 1024 * 1024 - len(IMAGE))
     assert api.put(token, image=exact).status_code == 201
 
 
@@ -160,3 +160,13 @@ def test_nullを許す項目はnullで受け付ける(api, token):
 
 def test_画像のcontent_typeがjpegでなければ422(api, token):
     assert api.put(token, content_type="image/png").status_code == 422
+
+
+def test_画像の先頭がJPEGの印でなければ422(api, token):
+    png = b"\x89PNG\r\n\x1a\nfake"
+    assert api.put(token, image=png).status_code == 422
+    assert api.repository.get_observation(OBSERVATION_ID) is None
+
+
+def test_画像の先頭が途中まで合っていても422(api, token):
+    assert api.put(token, image=b"\xff\xd8\x00rest").status_code == 422

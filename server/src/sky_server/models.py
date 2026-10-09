@@ -15,6 +15,17 @@ MAX_FUTURE = timedelta(minutes=10)
 Float = Annotated[float, Field(allow_inf_nan=False)]
 
 
+class PrivacyZone(BaseModel):
+    """公開版を作るときに隠す範囲（中心と半径）。サーバーが観測を受け取るときには使わない。"""
+
+    zone_id: str
+    lat: Annotated[float, Field(ge=-90, le=90, allow_inf_nan=False)]
+    lon: Annotated[float, Field(ge=-180, le=180, allow_inf_nan=False)]
+    radius_m: Annotated[float, Field(gt=0, le=50000, allow_inf_nan=False)]
+    label: str | None = None
+    created_at: datetime
+
+
 class User(BaseModel):
     user_id: str
     name: str
@@ -22,6 +33,10 @@ class User(BaseModel):
     created_at: datetime
     revoked_at: datetime | None = None
     consent_public: bool = False
+    privacy_zones: list[PrivacyZone] = []
+    # delete-user を始めた時刻と、そのとき消した観測の ID（2回目以降の削除で使う）
+    deletion_started_at: datetime | None = None
+    deletion_observation_ids: list[str] = []
 
 
 class _Strict(BaseModel):

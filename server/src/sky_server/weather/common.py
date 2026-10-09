@@ -2,6 +2,7 @@
 
 import gzip
 import json
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
@@ -10,12 +11,19 @@ import httpx
 from sky_server.storage import BlobStore
 
 USER_AGENT = "sky-weather-collection/0.1 (+https://github.com/hiroitozzz/sky-weather-collection)"
-TIMEOUT_S = 20.0
+# 接続、1回の読み取り、書き込み、接続の取得のそれぞれの上限（秒）。呼び出し全体の期限は DEADLINE_S
+TIMEOUT_S = 5.0
+# 外部 API の応答の大きさの上限。これを超えたら読むのをやめる
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+# 1回の呼び出し全体（接続から本文を読み終えるまで）の期限。接続や1回の読み取りごとではない
+DEADLINE_S = 20.0
 ENVELOPE_VERSION = 1
 ERROR_BODY_LIMIT = 500
 
 # 現在時刻を返す関数。テストでは固定の時刻を返すものに差し替える
 Clock = Callable[[], datetime]
+# 期限の計算に使う単調増加の時計（秒）。テストでは差し替える
+Monotonic = Callable[[], float]
 
 
 def utc_now() -> datetime:
@@ -31,8 +39,14 @@ class PermanentError(Exception):
 
 
 def create_client() -> httpx.Client:
-    """User-Agent とタイムアウトを設定した HTTP クライアントを作る。"""
-    return httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT_S)
+    """User-Agent、Accept-Encoding、タイムアウトを設定した HTTP クライアントを作る。
+
+    小さな圧縮データが展開すると巨大になる攻撃に備え、圧縮していない応答を求める。
+    """
+    return httpx.Client(
+        headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"},
+        timeout=httpx.Timeout(TIMEOUT_S),
+    )
 
 
 def round_coord(value: float) -> str:
@@ -90,23 +104,56 @@ def classify_response(response: httpx.Response) -> None:
         raise RetryableError(f"本文が JSON として読めない: {e}") from e
 
 
+def read_limited(
+    client: httpx.Client,
+    url: str,
+    params: dict[str, str],
+    monotonic: Monotonic = time.monotonic,
+) -> httpx.Response:
+    """GET して、本文を少しずつ読みながら大きさを数え、読み終えた応答を返す。
+
+    本文が `MAX_RESPONSE_BYTES` を超えたら、その時点で読むのをやめる。圧縮されている場合は
+    解いたあとの大きさを数える。呼び出し全体の期限は `DEADLINE_S` 秒で、期限が切れたら
+    読むのをやめる。大きすぎる場合、期限切れ、接続エラー、タイムアウトは `RetryableError` にする。
+    """
+    deadline = monotonic() + DEADLINE_S
+    try:
+        with client.stream("GET", url, params=params) as response:
+            chunks = []
+            size = 0
+            for chunk in response.iter_bytes():
+                size += len(chunk)
+                if size > MAX_RESPONSE_BYTES:
+                    raise RetryableError(f"応答が大きすぎる（{MAX_RESPONSE_BYTES} バイトを超えた）")
+                chunks.append(chunk)
+                if monotonic() > deadline:
+                    raise RetryableError(f"呼び出し全体の期限（{DEADLINE_S:g}秒）を過ぎた")
+            if monotonic() > deadline:
+                raise RetryableError(f"呼び出し全体の期限（{DEADLINE_S:g}秒）を過ぎた")
+            headers = {}
+            if "content-type" in response.headers:
+                headers["content-type"] = response.headers["content-type"]
+            return httpx.Response(response.status_code, headers=headers, content=b"".join(chunks))
+    except (httpx.TransportError, httpx.DecodingError) as e:
+        raise RetryableError(f"{type(e).__name__}: {e}") from e
+
+
 def get_checked(
     client: httpx.Client,
     url: str,
     params: dict[str, str],
     clock: Clock,
     allowed_statuses: tuple[int, ...] = (),
+    monotonic: Monotonic = time.monotonic,
 ) -> dict:
     """GET して、封筒の `requests` に入れる1件分の記録を返す。
 
     `allowed_statuses` に含まれる状態コードは失敗にせず、本文の検査もしない。
-    接続エラーとタイムアウトは `RetryableError` にする。`requested_at` は呼び出しの直前の時刻。
+    接続エラー、タイムアウト、応答が大きすぎる場合、呼び出し全体の期限が切れた場合は
+    `RetryableError` にする（`read_limited` を参照）。`requested_at` は呼び出しの直前の時刻。
     """
     requested_at = clock()
-    try:
-        response = client.get(url, params=params)
-    except httpx.TransportError as e:
-        raise RetryableError(f"{type(e).__name__}: {e}") from e
+    response = read_limited(client, url, params, monotonic)
     if response.status_code not in allowed_statuses:
         classify_response(response)
     return {

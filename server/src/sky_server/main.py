@@ -1,7 +1,10 @@
 """アップロード API（M1：ローカル版）。"""
 
 import hashlib
-from datetime import UTC, datetime
+import logging
+import math
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -12,6 +15,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from sky_server.auth import hash_token
 from sky_server.backends import build_backend
+from sky_server.config import get_backend_name, get_daily_upload_limit
 from sky_server.jobs import (
     JobRepository,
     JobRunner,
@@ -22,8 +26,12 @@ from sky_server.jobs import (
 from sky_server.models import UUID_PATTERN, ObservationMetadata, User
 from sky_server.storage import BlobStore, ObservationRepository
 from sky_server.task_auth import TaskAuthenticator, get_task_authenticator
+from sky_server.upload_guard import UploadGuard
+
+logger = logging.getLogger(__name__)
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+JPEG_MAGIC = b"\xff\xd8\xff"
 
 ObservationId = Annotated[str, PathParam(pattern=UUID_PATTERN)]
 
@@ -42,6 +50,7 @@ def create_app(
     scheduler: TaskScheduler | None = None,
     runner: JobRunner | None = None,
     task_auth: TaskAuthenticator | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> FastAPI:
     # 引数で渡されなかったものは、設定（SKY_BACKEND）に合わせて作る。全部渡されたら作らない
     if None in (repository, blob_store, job_repository, scheduler) or runner is None:
@@ -56,9 +65,23 @@ def create_app(
     # SKY_TASK_AUTH の値が正しくなければ、ここで起動時にエラーになる
     task_auth = task_auth or get_task_authenticator()
 
-    app = FastAPI(title="sky-weather-collection")
+    clock = clock or (lambda: datetime.now(UTC))
+    daily_limit = get_daily_upload_limit()
+
+    # 本番（gcp）では API の仕様の画面を公開しない
+    if get_backend_name() == "gcp":
+        app = FastAPI(
+            title="sky-weather-collection", docs_url=None, redoc_url=None, openapi_url=None
+        )
+    else:
+        app = FastAPI(title="sky-weather-collection")
+    app.add_middleware(UploadGuard, repository=repository)
 
     def current_user(request: Request) -> User:
+        # アップロードは UploadGuard が照合済み。同じリクエストで2回問い合わせない
+        guarded = getattr(request.state, "user", None)
+        if guarded is not None:
+            return guarded
         header = request.headers.get("Authorization", "")
         scheme, _, token = header.partition(" ")
         unauthorized = HTTPException(
@@ -112,6 +135,8 @@ def create_app(
         data = image.file.read(MAX_IMAGE_BYTES + 1)
         if len(data) > MAX_IMAGE_BYTES:
             raise HTTPException(413, "画像が大きすぎます（上限は10MBです）")
+        if not data.startswith(JPEG_MAGIC):
+            raise HTTPException(422, "image が JPEG の形式ではありません")
 
         try:
             meta = ObservationMetadata.model_validate_json(metadata)
@@ -126,10 +151,22 @@ def create_app(
         if existing is not None:
             return exists_response(existing, user, meta)
 
+        # 再送ではない新規の観測だけが、1日の上限の対象になる
+        now = clock()
+        day = now.strftime("%Y%m%d")
+        if repository.get_daily_count(user.user_id, day) >= daily_limit:
+            next_midnight = datetime(now.year, now.month, now.day, tzinfo=UTC) + timedelta(days=1)
+            retry_after = max(1, math.ceil((next_midnight - now).total_seconds()))
+            raise HTTPException(
+                429,
+                "1日に送れる観測の数の上限を超えました。明日の0時（UTC）以降にもう一度送ってください",
+                headers={"Retry-After": str(retry_after)},
+            )
+
         # キーにハッシュを含めて、同じ ID で別の画像が同時に来ても上書きし合わないようにする
         image_key = _image_key(observation_id, meta.image_sha256)
         blob_store.put(image_key, data)
-        record = meta.with_server_fields(user.user_id, datetime.now(UTC), image_key)
+        record = meta.with_server_fields(user.user_id, now, image_key)
         if not repository.add_observation(record):
             # 同時に同じ ID が登録された場合
             existing = repository.get_observation(observation_id)
@@ -137,6 +174,11 @@ def create_app(
                 raise HTTPException(500, "保存に失敗しました")
             return exists_response(existing, user, meta)
         reserve_weather_jobs(record)
+        # 件数の数え漏れは許容する。増加に失敗しても、作成済みの観測には 201 を返す
+        try:
+            repository.increment_daily_count(user.user_id, day)
+        except Exception:
+            logger.exception("1日の件数の増加に失敗しました（user_id=%s）", user.user_id)
         return JSONResponse({"observation_id": observation_id, "status": "created"}, 201)
 
     @app.get("/v1/observations/{observation_id}")

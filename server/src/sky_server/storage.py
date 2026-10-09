@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -31,6 +32,30 @@ class ObservationRepository(ABC):
     def add_observation(self, record: dict) -> bool:
         """観測を保存する。同じ ID がすでにあれば保存せず False を返す。"""
 
+    @abstractmethod
+    def get_daily_count(self, user_id: str, day: str) -> int:
+        """撮影者のその日（`YYYYMMDD`）の新規の観測の件数。記録がなければ 0。"""
+
+    @abstractmethod
+    def increment_daily_count(self, user_id: str, day: str) -> None:
+        """撮影者のその日（`YYYYMMDD`）の件数を 1 増やす。"""
+
+    @abstractmethod
+    def list_observations_by_user(self, user_id: str) -> list[dict]:
+        """撮影者の観測をすべて返す。"""
+
+    @abstractmethod
+    def delete_observation(self, observation_id: str) -> None:
+        """観測を消す。なければ何もしない。"""
+
+    @abstractmethod
+    def delete_daily_counts(self, user_id: str) -> None:
+        """撮影者の送信数の記録（`usage`）をすべて消す。なければ何もしない。"""
+
+    @abstractmethod
+    def delete_user(self, user_id: str) -> None:
+        """撮影者を消す。なければ何もしない。"""
+
 
 class BlobStore(ABC):
     """画像や天気データ（バイト列）の保存先。"""
@@ -41,6 +66,17 @@ class BlobStore(ABC):
     @abstractmethod
     def get(self, key: str) -> bytes | None: ...
 
+    @abstractmethod
+    def delete(self, key: str) -> None:
+        """消す。なければ何もしない。"""
+
+    @abstractmethod
+    def delete_prefix(self, prefix: str) -> None:
+        """接頭辞の下にあるものをすべて消す。なければ何もしない。
+
+        `prefix` は `/` で終わる形で渡す（`ab` で `abc/` まで消えないように）。
+        """
+
 
 class LocalObservationRepository(ObservationRepository):
     """1件1ファイルの JSON で保存する。"""
@@ -48,8 +84,10 @@ class LocalObservationRepository(ObservationRepository):
     def __init__(self, root: Path) -> None:
         self._users = root / "users"
         self._observations = root / "observations"
+        self._usage = root / "usage"
         self._users.mkdir(parents=True, exist_ok=True)
         self._observations.mkdir(parents=True, exist_ok=True)
+        self._usage.mkdir(parents=True, exist_ok=True)
 
     def add_user(self, user: User) -> None:
         self.update_user(user)
@@ -81,6 +119,39 @@ class LocalObservationRepository(ObservationRepository):
         data = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
         return _create_exclusive(path, data)
 
+    def get_daily_count(self, user_id: str, day: str) -> int:
+        path = self._usage / f"{user_id}_{day}.json"
+        if not path.exists():
+            return 0
+        return json.loads(path.read_text(encoding="utf-8"))["count"]
+
+    def increment_daily_count(self, user_id: str, day: str) -> None:
+        # 読んでから書くまでの間の同時実行で数え漏らすことは許容する（上限は被害を抑えるためのもの）
+        count = self.get_daily_count(user_id, day) + 1
+        data = {"user_id": user_id, "day": day, "count": count}
+        _write_atomic(
+            self._usage / f"{user_id}_{day}.json",
+            json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+
+    def list_observations_by_user(self, user_id: str) -> list[dict]:
+        records = (
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in self._observations.glob("*.json")
+        )
+        return [record for record in records if record.get("user_id") == user_id]
+
+    def delete_observation(self, observation_id: str) -> None:
+        (self._observations / f"{observation_id}.json").unlink(missing_ok=True)
+
+    def delete_daily_counts(self, user_id: str) -> None:
+        for path in self._usage.glob("*.json"):
+            if json.loads(path.read_text(encoding="utf-8")).get("user_id") == user_id:
+                path.unlink(missing_ok=True)
+
+    def delete_user(self, user_id: str) -> None:
+        (self._users / f"{user_id}.json").unlink(missing_ok=True)
+
 
 class LocalBlobStore(BlobStore):
     def __init__(self, root: Path, dirname: str = "images") -> None:
@@ -95,6 +166,22 @@ class LocalBlobStore(BlobStore):
     def get(self, key: str) -> bytes | None:
         path = self._root / key
         return path.read_bytes() if path.exists() else None
+
+    def delete(self, key: str) -> None:
+        (self._root / key).unlink(missing_ok=True)
+
+    def delete_prefix(self, prefix: str) -> None:
+        check_prefix(prefix)
+        directory = (self._root / prefix).resolve()
+        if not directory.is_relative_to(self._root.resolve()) or directory == self._root.resolve():
+            raise ValueError(f"保存先の外や全体は消せません: {prefix!r}")
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def check_prefix(prefix: str) -> None:
+    """接頭辞が `/` で終わり、空でないことを確かめる。違えば ValueError。"""
+    if not prefix.endswith("/") or prefix.strip("/") == "":
+        raise ValueError(f"接頭辞は空でない、/ で終わる形にしてください: {prefix!r}")
 
 
 def _create_exclusive(path: Path, data: bytes) -> bool:

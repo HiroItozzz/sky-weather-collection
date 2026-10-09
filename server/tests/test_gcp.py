@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import pytest
 from conftest import make_metadata
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from gcp_fakes import FakeFirestoreClient, FakeStorageClient, FakeTasksClient
 from starlette.requests import Request
 
@@ -20,7 +21,7 @@ from sky_server.jobs import (
     ensure_weather_jobs,
 )
 from sky_server.main import create_app
-from sky_server.models import ObservationMetadata, User
+from sky_server.models import ObservationMetadata, PrivacyZone, User
 from sky_server.storage import LocalBlobStore, LocalObservationRepository
 from sky_server.task_auth import get_task_authenticator
 
@@ -109,7 +110,25 @@ def test_firestore_コレクションの名前():
     FirestoreObservationRepository(client).add_user(make_user())
     FirestoreObservationRepository(client).add_observation({"observation_id": "o1"})
     FirestoreJobRepository(client).add_job(make_job())
-    assert set(client.collections) == {"users", "observations", "weather_jobs"}
+    FirestoreObservationRepository(client).increment_daily_count("u1", "20261009")
+    assert set(client.collections) == {"users", "observations", "weather_jobs", "usage"}
+
+
+def test_firestore_1日の件数は記録がなければ0で増やすたびに1ずつ増える():
+    client = FakeFirestoreClient()
+    repo = FirestoreObservationRepository(client)
+    assert repo.get_daily_count("u1", "20261009") == 0
+    repo.increment_daily_count("u1", "20261009")
+    repo.increment_daily_count("u1", "20261009")
+    repo.increment_daily_count("u1", "20261010")
+    assert repo.get_daily_count("u1", "20261009") == 2
+    assert repo.get_daily_count("u1", "20261010") == 1
+    assert repo.get_daily_count("u2", "20261009") == 0
+    assert client.collections["usage"]["u1_20261009"] == {
+        "user_id": "u1",
+        "day": "20261009",
+        "count": 2,
+    }
 
 
 def test_firestore_天気ジョブの用意がそのまま動く():
@@ -121,6 +140,47 @@ def test_firestore_天気ジョブの用意がそのまま動く():
     ensure_weather_jobs(record, jobs, tasks)
     job = jobs.get_job(f"{meta.observation_id}_label")
     assert job.enqueued is True
+
+
+def test_firestore_撮影者の観測と送信数の記録と撮影者を消せる():
+    client = FakeFirestoreClient()
+    repo = FirestoreObservationRepository(client)
+    repo.add_user(make_user("h1", "u1"))
+    repo.add_user(make_user("h2", "u2"))
+    for observation_id, user_id in [("o1", "u1"), ("o2", "u2"), ("o3", "u1")]:
+        repo.add_observation({"observation_id": observation_id, "user_id": user_id})
+    repo.increment_daily_count("u1", "20261009")
+    repo.increment_daily_count("u1", "20261010")
+    repo.increment_daily_count("u2", "20261009")
+    assert {r["observation_id"] for r in repo.list_observations_by_user("u1")} == {"o1", "o3"}
+    repo.delete_observation("o1")
+    repo.delete_observation("nope")
+    repo.delete_daily_counts("u1")
+    repo.delete_daily_counts("nope")
+    repo.delete_user("u1")
+    repo.delete_user("nope")
+    assert repo.get_observation("o1") is None
+    assert repo.get_observation("o3") is not None
+    assert repo.get_daily_count("u1", "20261009") == 0
+    assert repo.get_daily_count("u2", "20261009") == 1
+    assert repo.get_user("u1") is None
+    assert repo.get_user("u2") is not None
+
+
+def test_firestore_ジョブを消せてないジョブを消してもエラーにならない():
+    repo = FirestoreJobRepository(FakeFirestoreClient())
+    repo.add_job(make_job())
+    repo.delete_job("j1_forecast")
+    repo.delete_job("j1_forecast")
+    assert repo.get_job("j1_forecast") is None
+
+
+def test_firestore_プライバシーゾーンを保存して読み戻せる():
+    repo = FirestoreObservationRepository(FakeFirestoreClient())
+    zone = PrivacyZone(zone_id="z1", lat=35.0, lon=139.0, radius_m=300, created_at=RUN_AT)
+    user = make_user().model_copy(update={"privacy_zones": [zone]})
+    repo.add_user(user)
+    assert repo.get_user("u1") == user
 
 
 # Cloud Storage
@@ -138,6 +198,61 @@ def test_gcs_取得とないキーはNone():
     store.put("k", b"data")
     assert store.get("k") == b"data"
     assert store.get("missing") is None
+
+
+def test_gcs_消せてないキーを消してもエラーにならない():
+    client = FakeStorageClient()
+    images = GcsBlobStore("bucket", "images/", client)
+    weather = GcsBlobStore("bucket", "weather/", client)
+    images.put("k", b"x")
+    weather.put("k", b"y")
+    images.delete("k")
+    images.delete("k")
+    assert images.get("k") is None
+    assert weather.get("k") == b"y"
+
+
+def test_gcs_接頭辞の下だけを消し別の接頭辞や前方一致は残る():
+    client = FakeStorageClient()
+    images = GcsBlobStore("bucket", "images/", client)
+    weather = GcsBlobStore("bucket", "weather/", client)
+    for key in ("ab/1.jpg", "ab/2.jpg", "abc/1.jpg", "ab.jpg"):
+        images.put(key, b"x")
+    weather.put("ab/1.jpg", b"y")
+    images.delete_prefix("ab/")
+    images.delete_prefix("ab/")
+    assert sorted(client.buckets["bucket"]) == [
+        "images/ab.jpg",
+        "images/abc/1.jpg",
+        "weather/ab/1.jpg",
+    ]
+
+
+@pytest.mark.parametrize("prefix", ["", "/", "ab"])
+def test_gcs_接頭辞がスラッシュで終わっていなければエラー(prefix):
+    store = GcsBlobStore("bucket", "images/", FakeStorageClient())
+    with pytest.raises(ValueError):
+        store.delete_prefix(prefix)
+
+
+def test_ローカル_接頭辞の下だけを消し前方一致は残る(tmp_path):
+    store = LocalBlobStore(tmp_path)
+    for key in ("ab/1.jpg", "ab/2.jpg", "abc/1.jpg", "ab.jpg"):
+        store.put(key, b"x")
+    store.delete_prefix("ab/")
+    store.delete_prefix("ab/")
+    assert [store.get(k) for k in ("ab/1.jpg", "ab/2.jpg")] == [None, None]
+    assert store.get("abc/1.jpg") == b"x"
+    assert store.get("ab.jpg") == b"x"
+
+
+@pytest.mark.parametrize("prefix", ["", "/", "ab", "../", "../images/"])
+def test_ローカル_不正な接頭辞はエラーで何も消さない(tmp_path, prefix):
+    store = LocalBlobStore(tmp_path)
+    store.put("ab/1.jpg", b"x")
+    with pytest.raises(ValueError):
+        store.delete_prefix(prefix)
+    assert store.get("ab/1.jpg") == b"x"
 
 
 # Cloud Tasks
@@ -380,3 +495,34 @@ def test_localのcreate_appは従来どおり動く(tmp_path, monkeypatch):
     monkeypatch.delenv("SKY_BACKEND", raising=False)
     create_app(tmp_path)
     assert LocalBlobStore(tmp_path).get("none") is None
+
+
+# gcp での小さな修正
+
+
+def test_gcpでSKY_TASK_AUTHがnoneなら起動時にエラー(gcp_env):
+    patch_clients(gcp_env)
+    gcp_env.setenv("SKY_TASK_AUTH", "none")
+    with pytest.raises(ConfigError, match="SKY_TASK_AUTH"):
+        get_task_authenticator()
+    with pytest.raises(ConfigError, match="SKY_TASK_AUTH"):
+        create_app()
+
+
+def test_localならSKY_TASK_AUTHがnoneでも起動できる(tmp_path, monkeypatch):
+    monkeypatch.delenv("SKY_BACKEND", raising=False)
+    monkeypatch.setenv("SKY_TASK_AUTH", "none")
+    create_app(tmp_path)
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_gcpでは仕様の画面を公開しない(gcp_env, path):
+    patch_clients(gcp_env)
+    gcp_env.setenv("SKY_TASK_AUTH", "oidc")
+    assert TestClient(create_app()).get(path).status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_localでは仕様の画面を公開する(tmp_path, monkeypatch, path):
+    monkeypatch.delenv("SKY_BACKEND", raising=False)
+    assert TestClient(create_app(tmp_path)).get(path).status_code == 200

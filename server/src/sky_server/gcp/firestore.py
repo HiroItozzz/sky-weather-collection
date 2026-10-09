@@ -11,6 +11,7 @@ from sky_server.storage import ObservationRepository
 USERS = "users"
 OBSERVATIONS = "observations"
 WEATHER_JOBS = "weather_jobs"
+USAGE = "usage"
 
 
 def _create(client, collection: str, doc_id: str, data: dict) -> bool:
@@ -59,6 +60,32 @@ class FirestoreObservationRepository(ObservationRepository):
     def add_observation(self, record: dict) -> bool:
         return _create(self._client, OBSERVATIONS, record["observation_id"], record)
 
+    def get_daily_count(self, user_id: str, day: str) -> int:
+        data = _get(self._client, USAGE, f"{user_id}_{day}")
+        return 0 if data is None else data["count"]
+
+    def increment_daily_count(self, user_id: str, day: str) -> None:
+        self._client.collection(USAGE).document(f"{user_id}_{day}").set(
+            {"user_id": user_id, "day": day, "count": firestore.Increment(1)}, merge=True
+        )
+
+    def list_observations_by_user(self, user_id: str) -> list[dict]:
+        query = self._client.collection(OBSERVATIONS).where(
+            filter=FieldFilter("user_id", "==", user_id)
+        )
+        return [snapshot.to_dict() for snapshot in query.stream()]
+
+    def delete_observation(self, observation_id: str) -> None:
+        self._client.collection(OBSERVATIONS).document(observation_id).delete()
+
+    def delete_daily_counts(self, user_id: str) -> None:
+        query = self._client.collection(USAGE).where(filter=FieldFilter("user_id", "==", user_id))
+        for snapshot in list(query.stream()):
+            snapshot.reference.delete()
+
+    def delete_user(self, user_id: str) -> None:
+        self._client.collection(USERS).document(user_id).delete()
+
 
 class FirestoreJobRepository(JobRepository):
     """ジョブは `weather_jobs` に保存する。実行の重複はローカル版と同じく許容する。"""
@@ -75,3 +102,6 @@ class FirestoreJobRepository(JobRepository):
 
     def update_job(self, job: WeatherJob) -> None:
         self._client.collection(WEATHER_JOBS).document(job.job_id).set(job.model_dump(mode="json"))
+
+    def delete_job(self, job_id: str) -> None:
+        self._client.collection(WEATHER_JOBS).document(job_id).delete()

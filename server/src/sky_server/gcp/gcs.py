@@ -3,7 +3,7 @@
 from google.api_core.exceptions import NotFound
 from google.cloud import storage
 
-from sky_server.storage import BlobStore
+from sky_server.storage import BlobStore, check_prefix
 
 
 class GcsBlobStore(BlobStore):
@@ -21,3 +21,18 @@ class GcsBlobStore(BlobStore):
             return self._bucket.blob(self._prefix + key).download_as_bytes()
         except NotFound:
             return None
+
+    def delete(self, key: str) -> None:
+        try:
+            self._bucket.blob(self._prefix + key).delete()
+        except NotFound:
+            pass
+
+    def delete_prefix(self, prefix: str) -> None:
+        check_prefix(prefix)
+        # 一覧は消しながら進めないよう、先に全部取り出す
+        for blob in list(self._bucket.list_blobs(prefix=self._prefix + prefix)):
+            try:
+                blob.delete()
+            except NotFound:
+                pass
