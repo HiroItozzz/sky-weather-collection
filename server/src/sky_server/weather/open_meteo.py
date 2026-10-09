@@ -7,15 +7,18 @@ import httpx
 from sky_server.config import get_open_meteo_url
 from sky_server.storage import BlobStore
 from sky_server.weather.common import (
+    Clock,
     build_envelope,
     ceil_15min,
     ceil_hour,
+    ensure_range_ended,
     floor_15min,
     floor_hour,
     get_checked,
     raw_key,
     round_coord,
     save_envelope,
+    utc_now,
 )
 
 PROVIDER = "open_meteo"
@@ -57,6 +60,10 @@ def build_params(lat: float, lon: float, captured_at: datetime) -> dict[str, str
     }
 
 
+def _parse(value: str) -> datetime:
+    return datetime.strptime(value, TIME_FORMAT).replace(tzinfo=UTC)
+
+
 def fetch_open_meteo(
     client: httpx.Client,
     blob_store: BlobStore,
@@ -66,20 +73,26 @@ def fetch_open_meteo(
     captured_at: datetime,
     lat: float,
     lon: float,
-    now: datetime,
+    clock: Clock = utc_now,
 ) -> str:
     """1回取得して封筒を保存し、`blob_key` を返す。
 
     失敗したときは `RetryableError` か `PermanentError` を投げ、何も保存しない。
+    `label` のときは、範囲の終わりが来ていなければ取得せず `RetryableError` を投げる。
     """
     params = build_params(lat, lon, captured_at)
-    request = get_checked(client, get_open_meteo_url(), params, now)
+    if phase == "label":
+        ensure_range_ended(
+            max(_parse(params["end_hour"]), _parse(params["end_minutely_15"])), clock
+        )
+    fetched_at = clock()
+    request = get_checked(client, get_open_meteo_url(), params, clock)
     envelope = build_envelope(
         provider=PROVIDER,
         phase=phase,
         observation_id=observation_id,
         captured_at=captured_at,
-        fetched_at=now,
+        fetched_at=fetched_at,
         attribution=ATTRIBUTION,
         license=LICENSE,
         query_location={"lat": params["latitude"], "lon": params["longitude"]},

@@ -1,9 +1,10 @@
 import gzip
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from conftest import SteppingClock, fixed_clock
 
 from sky_server.storage import LocalBlobStore
 from sky_server.weather.common import (
@@ -23,6 +24,7 @@ from sky_server.weather.common import (
 )
 
 NOW = datetime(2026, 10, 9, 6, 30, 5, tzinfo=UTC)
+CLOCK = fixed_clock(NOW)
 
 
 def client_with(handler) -> httpx.Client:
@@ -68,7 +70,7 @@ def test_クライアントにUser_Agentとタイムアウトが設定される(
 def test_429と5xxは再試行できる失敗(status):
     client = client_with(lambda request: httpx.Response(status, text="x"))
     with pytest.raises(RetryableError, match=str(status)):
-        get_checked(client, "https://example.test/", {}, NOW)
+        get_checked(client, "https://example.test/", {}, CLOCK)
 
 
 def test_接続エラーとタイムアウトは再試行できる失敗():
@@ -80,25 +82,27 @@ def test_接続エラーとタイムアウトは再試行できる失敗():
 
     for handler in (connect_error, timeout):
         with pytest.raises(RetryableError):
-            get_checked(client_with(handler), "https://example.test/", {}, NOW)
+            get_checked(client_with(handler), "https://example.test/", {}, CLOCK)
 
 
 def test_本文がJSONでなければ再試行できる失敗():
     client = client_with(lambda request: httpx.Response(200, text="<html>"))
     with pytest.raises(RetryableError):
-        get_checked(client, "https://example.test/", {}, NOW)
+        get_checked(client, "https://example.test/", {}, CLOCK)
 
 
 def test_400は再試行できない失敗で本文の先頭500文字が残る():
     client = client_with(lambda request: httpx.Response(400, text="あ" * 600))
     with pytest.raises(PermanentError) as e:
-        get_checked(client, "https://example.test/", {}, NOW)
+        get_checked(client, "https://example.test/", {}, CLOCK)
     assert str(e.value) == "HTTP 400: " + "あ" * 500
 
 
 def test_許可した状態コードは失敗にならない():
     client = client_with(lambda request: httpx.Response(404, text="not json"))
-    record = get_checked(client, "https://example.test/", {"a": "1"}, NOW, allowed_statuses=(404,))
+    record = get_checked(
+        client, "https://example.test/", {"a": "1"}, CLOCK, allowed_statuses=(404,)
+    )
     assert record == {
         "url": "https://example.test/",
         "params": {"a": "1"},
@@ -160,3 +164,28 @@ def test_stationsはアメダス以外では封筒に入らない():
         requests=[],
     )
     assert "stations" not in envelope
+
+
+def test_requested_atは呼び出しごとにclockの値になる():
+    clock = SteppingClock(NOW, timedelta(seconds=10))
+    client = client_with(lambda request: httpx.Response(200, text="{}"))
+    first = get_checked(client, "https://example.test/", {}, clock)
+    second = get_checked(client, "https://example.test/", {}, clock)
+    assert first["requested_at"] == "2026-10-09T06:30:05+00:00"
+    assert second["requested_at"] == "2026-10-09T06:30:15+00:00"
+    assert clock.calls == 2
+
+
+def test_requested_atは通信の直前に取る():
+    order = []
+
+    def clock():
+        order.append("clock")
+        return NOW
+
+    def handler(request):
+        order.append("request")
+        return httpx.Response(200, text="{}")
+
+    get_checked(client_with(handler), "https://example.test/", {}, clock)
+    assert order == ["clock", "request"]
