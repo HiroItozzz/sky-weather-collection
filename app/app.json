@@ -35,7 +35,8 @@
         {
           "locationWhenInUsePermission": "撮影した場所を記録し、方位の補正（偏角）を計算するために位置情報を使います。"
         }
-      ]
+      ],
+      "expo-secure-store"
     ]
   }
 }
