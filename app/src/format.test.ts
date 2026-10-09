@@ -26,9 +26,10 @@ describe("ラベル", () => {
   });
 
   it("答え", () => {
-    expect(answerLabel("rain")).toBe("降った");
-    expect(answerLabel("no_rain")).toBe("降らなかった");
-    expect(answerLabel("unknown")).toBe("答え合わせ待ち（撮影の約6〜7時間後）");
+    expect(answerLabel("rain", false)).toBe("降った");
+    expect(answerLabel("no_rain", false)).toBe("降らなかった");
+    expect(answerLabel("unknown", true)).toBe("答え合わせ待ち（撮影の約6〜7時間後）");
+    expect(answerLabel("unknown", false)).toBe("答え合わせできませんでした");
   });
 
   it("当たり外れ", () => {

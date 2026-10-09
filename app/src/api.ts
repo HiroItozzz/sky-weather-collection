@@ -19,7 +19,8 @@ export type ObservationView = {
   captured_at: string;
   user_guess: "rain" | "no_rain" | null;
   weather_at_capture: WeatherAtCapture | null;
-  answer: { result: AnswerResult; source: "amedas" | "open_meteo" | null };
+  /** pending：答え合わせのジョブがまだ終わっていなければ true（13.5） */
+  answer: { result: AnswerResult; source: "amedas" | "open_meteo" | null; pending: boolean };
   correct: boolean | null;
 };
 
@@ -91,6 +92,8 @@ export function parseObservationView(value: unknown): ObservationView | null {
   if (weather === undefined) return null;
   if (!isObject(answer)) return null;
   const { result, source } = answer;
+  // pending がない・bool でない応答は、項目を足す前のサーバーとみなし、まだ終わっていない（true）扱いにする
+  const pending = typeof answer.pending === "boolean" ? answer.pending : true;
   if (result !== "rain" && result !== "no_rain" && result !== "unknown") return null;
   if (source !== null && source !== "amedas" && source !== "open_meteo") return null;
   return {
@@ -99,7 +102,7 @@ export function parseObservationView(value: unknown): ObservationView | null {
     captured_at,
     user_guess,
     weather_at_capture: weather,
-    answer: { result, source },
+    answer: { result, source, pending },
     correct,
   };
 }

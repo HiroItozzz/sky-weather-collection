@@ -23,10 +23,11 @@ export function guessLabel(guess: "rain" | "no_rain" | null): string {
   return "予想なし";
 }
 
-export function answerLabel(result: AnswerResult): string {
+export function answerLabel(result: AnswerResult, pending: boolean): string {
   if (result === "rain") return "降った";
   if (result === "no_rain") return "降らなかった";
-  return "答え合わせ待ち（撮影の約6〜7時間後）";
+  // unknown：ジョブがまだなら待ち、終わっても判定できなかったならその旨
+  return pending ? "答え合わせ待ち（撮影の約6〜7時間後）" : "答え合わせできませんでした";
 }
 
 /** 当たりは「当たり」、はずれは「はずれ」。まだわからないときは null（表示しない）。 */

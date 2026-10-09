@@ -48,7 +48,7 @@ function Item({ item }: { item: ObservationView }) {
         <Text style={styles.text}>{formatDateTime(item.captured_at)}</Text>
         <Text style={styles.sub}>予想：{guessLabel(item.user_guess)}</Text>
         <Text style={styles.sub}>
-          答え：{answerLabel(item.answer.result)}
+          答え：{answerLabel(item.answer.result, item.answer.pending)}
           {correct !== null ? `　${correct}` : ""}
         </Text>
         {item.weather_at_capture !== null ? (

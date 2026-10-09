@@ -19,7 +19,7 @@ function view(weather: WeatherAtCapture | null): ApiResult<ObservationView> {
       captured_at: "2026-10-09T05:00:00Z",
       user_guess: null,
       weather_at_capture: weather,
-      answer: { result: "unknown", source: null },
+      answer: { result: "unknown", source: null, pending: true },
       correct: null,
     },
   };
