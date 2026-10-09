@@ -39,6 +39,22 @@ class ObservationRepository(ABC):
     def increment_daily_count(self, user_id: str, day: str) -> None:
         """撮影者のその日（`YYYYMMDD`）の件数を 1 増やす。"""
 
+    @abstractmethod
+    def list_observations_by_user(self, user_id: str) -> list[dict]:
+        """撮影者の観測をすべて返す。"""
+
+    @abstractmethod
+    def delete_observation(self, observation_id: str) -> None:
+        """観測を消す。なければ何もしない。"""
+
+    @abstractmethod
+    def delete_daily_counts(self, user_id: str) -> None:
+        """撮影者の送信数の記録（`usage`）をすべて消す。なければ何もしない。"""
+
+    @abstractmethod
+    def delete_user(self, user_id: str) -> None:
+        """撮影者を消す。なければ何もしない。"""
+
 
 class BlobStore(ABC):
     """画像や天気データ（バイト列）の保存先。"""
@@ -48,6 +64,10 @@ class BlobStore(ABC):
 
     @abstractmethod
     def get(self, key: str) -> bytes | None: ...
+
+    @abstractmethod
+    def delete(self, key: str) -> None:
+        """消す。なければ何もしない。"""
 
 
 class LocalObservationRepository(ObservationRepository):
@@ -106,6 +126,24 @@ class LocalObservationRepository(ObservationRepository):
             json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
         )
 
+    def list_observations_by_user(self, user_id: str) -> list[dict]:
+        records = (
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in self._observations.glob("*.json")
+        )
+        return [record for record in records if record.get("user_id") == user_id]
+
+    def delete_observation(self, observation_id: str) -> None:
+        (self._observations / f"{observation_id}.json").unlink(missing_ok=True)
+
+    def delete_daily_counts(self, user_id: str) -> None:
+        for path in self._usage.glob("*.json"):
+            if json.loads(path.read_text(encoding="utf-8")).get("user_id") == user_id:
+                path.unlink(missing_ok=True)
+
+    def delete_user(self, user_id: str) -> None:
+        (self._users / f"{user_id}.json").unlink(missing_ok=True)
+
 
 class LocalBlobStore(BlobStore):
     def __init__(self, root: Path, dirname: str = "images") -> None:
@@ -120,6 +158,9 @@ class LocalBlobStore(BlobStore):
     def get(self, key: str) -> bytes | None:
         path = self._root / key
         return path.read_bytes() if path.exists() else None
+
+    def delete(self, key: str) -> None:
+        (self._root / key).unlink(missing_ok=True)
 
 
 def _create_exclusive(path: Path, data: bytes) -> bool:

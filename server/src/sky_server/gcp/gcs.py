@@ -21,3 +21,9 @@ class GcsBlobStore(BlobStore):
             return self._bucket.blob(self._prefix + key).download_as_bytes()
         except NotFound:
             return None
+
+    def delete(self, key: str) -> None:
+        try:
+            self._bucket.blob(self._prefix + key).delete()
+        except NotFound:
+            pass

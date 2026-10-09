@@ -118,7 +118,30 @@ def test_elemsで絞れないときは全地点から選ぶ():
 
 
 def test_地点が3つに満たないときはあるだけ返す():
-    assert len(select_stations({"1": station(35.0, 139.0)}, 35.0, 139.0)) == 1
+    assert len(select_stations({"10001": station(35.0, 139.0)}, 35.0, 139.0)) == 1
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["1000", "100001", "1000a", "../etc", "１００００", "10000\n", "", "10 00"],
+)
+def test_地点番号が5桁の数字でない地点は捨てる(code):
+    table = {**TABLE, code: station(35.681, 139.761, name="変な番号")}
+    codes = [s["code"] for s in select_stations(table, 35.681, 139.761)]
+    assert code not in codes
+    assert len(codes) == 3
+
+
+def test_地点番号がすべて変ならどれも選ばない():
+    assert select_stations({"abc": station(35.0, 139.0)}, 35.0, 139.0) == []
+
+
+def test_変な地点番号しかない一覧では取得せず再試行できない失敗(tmp_path):
+    store = LocalBlobStore(tmp_path, "weather")
+    server = Server(table={"../x": station(35.68, 139.76)})
+    with pytest.raises(PermanentError):
+        fetch(server, store)
+    assert server.point_calls == []
 
 
 def test_2ファイルになる範囲():

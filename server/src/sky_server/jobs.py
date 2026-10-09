@@ -76,6 +76,10 @@ class JobRepository(ABC):
     @abstractmethod
     def update_job(self, job: WeatherJob) -> None: ...
 
+    @abstractmethod
+    def delete_job(self, job_id: str) -> None:
+        """ジョブを消す。なければ何もしない。"""
+
 
 class TaskScheduler(ABC):
     """「この時刻にこのジョブを実行してほしい」という予約。"""
@@ -104,6 +108,9 @@ class LocalJobRepository(JobRepository):
 
     def update_job(self, job: WeatherJob) -> None:
         _write_atomic(self._dir / f"{job.job_id}.json", job.model_dump_json(indent=2).encode())
+
+    def delete_job(self, job_id: str) -> None:
+        (self._dir / f"{job_id}.json").unlink(missing_ok=True)
 
 
 class LocalTaskScheduler(TaskScheduler):

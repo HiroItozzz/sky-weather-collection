@@ -8,6 +8,7 @@ from conftest import SteppingClock, fixed_clock
 
 from sky_server.storage import LocalBlobStore
 from sky_server.weather.common import (
+    MAX_RESPONSE_BYTES,
     PermanentError,
     RetryableError,
     build_envelope,
@@ -189,3 +190,68 @@ def test_requested_atは通信の直前に取る():
 
     get_checked(client_with(handler), "https://example.test/", {}, clock)
     assert order == ["clock", "request"]
+
+
+def test_応答がちょうど5MBなら受け取る():
+    body = b" " * (MAX_RESPONSE_BYTES - 2) + b"{}"
+    client = client_with(lambda request: httpx.Response(200, content=body))
+    record = get_checked(client, "https://example.test/", {}, CLOCK)
+    assert len(record["body"]) == MAX_RESPONSE_BYTES
+
+
+def test_応答が5MBを1バイト超えたら再試行できる失敗():
+    body = b" " * (MAX_RESPONSE_BYTES - 1) + b"{}"
+    client = client_with(lambda request: httpx.Response(200, content=body))
+    with pytest.raises(RetryableError, match="大きすぎる"):
+        get_checked(client, "https://example.test/", {}, CLOCK)
+
+
+def test_大きさは複数に分けて届く本文でも合計で数える():
+    def chunks():
+        for _ in range(6):
+            yield b" " * (1024 * 1024)
+
+    client = client_with(lambda request: httpx.Response(200, content=chunks()))
+    with pytest.raises(RetryableError, match="大きすぎる"):
+        get_checked(client, "https://example.test/", {}, CLOCK)
+
+
+def test_圧縮された応答は解いたあとの大きさを数える():
+    body = gzip.compress(b" " * (MAX_RESPONSE_BYTES + 1))
+    assert len(body) < 100 * 1024
+    client = client_with(
+        lambda request: httpx.Response(200, content=body, headers={"Content-Encoding": "gzip"})
+    )
+    with pytest.raises(RetryableError, match="大きすぎる"):
+        get_checked(client, "https://example.test/", {}, CLOCK)
+
+
+class FakeMonotonic:
+    """呼ばれるたびに `step` 秒ずつ進む時計。"""
+
+    def __init__(self, step: float) -> None:
+        self._now = 0.0
+        self._step = step
+
+    def __call__(self) -> float:
+        now = self._now
+        self._now += self._step
+        return now
+
+
+def slow_body():
+    yield b"{"
+    yield b"}"
+
+
+def test_呼び出し全体の期限を過ぎたら再試行できる失敗():
+    client = client_with(lambda request: httpx.Response(200, content=slow_body()))
+    # 開始で 0 秒、1つ目の塊を読んだあとで 15 秒、2つ目のあとで 30 秒になる
+    with pytest.raises(RetryableError, match="期限"):
+        get_checked(client, "https://example.test/", {}, CLOCK, monotonic=FakeMonotonic(15.0))
+
+
+def test_期限の内側なら受け取る():
+    client = client_with(lambda request: httpx.Response(200, content=slow_body()))
+    record = get_checked(client, "https://example.test/", {}, CLOCK, monotonic=FakeMonotonic(5.0))
+    assert record["body"] == "{}"

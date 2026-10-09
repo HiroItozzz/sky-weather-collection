@@ -21,7 +21,7 @@ from sky_server.jobs import (
     ensure_weather_jobs,
 )
 from sky_server.main import create_app
-from sky_server.models import ObservationMetadata, User
+from sky_server.models import ObservationMetadata, PrivacyZone, User
 from sky_server.storage import LocalBlobStore, LocalObservationRepository
 from sky_server.task_auth import get_task_authenticator
 
@@ -142,6 +142,47 @@ def test_firestore_天気ジョブの用意がそのまま動く():
     assert job.enqueued is True
 
 
+def test_firestore_撮影者の観測と送信数の記録と撮影者を消せる():
+    client = FakeFirestoreClient()
+    repo = FirestoreObservationRepository(client)
+    repo.add_user(make_user("h1", "u1"))
+    repo.add_user(make_user("h2", "u2"))
+    for observation_id, user_id in [("o1", "u1"), ("o2", "u2"), ("o3", "u1")]:
+        repo.add_observation({"observation_id": observation_id, "user_id": user_id})
+    repo.increment_daily_count("u1", "20261009")
+    repo.increment_daily_count("u1", "20261010")
+    repo.increment_daily_count("u2", "20261009")
+    assert {r["observation_id"] for r in repo.list_observations_by_user("u1")} == {"o1", "o3"}
+    repo.delete_observation("o1")
+    repo.delete_observation("nope")
+    repo.delete_daily_counts("u1")
+    repo.delete_daily_counts("nope")
+    repo.delete_user("u1")
+    repo.delete_user("nope")
+    assert repo.get_observation("o1") is None
+    assert repo.get_observation("o3") is not None
+    assert repo.get_daily_count("u1", "20261009") == 0
+    assert repo.get_daily_count("u2", "20261009") == 1
+    assert repo.get_user("u1") is None
+    assert repo.get_user("u2") is not None
+
+
+def test_firestore_ジョブを消せてないジョブを消してもエラーにならない():
+    repo = FirestoreJobRepository(FakeFirestoreClient())
+    repo.add_job(make_job())
+    repo.delete_job("j1_forecast")
+    repo.delete_job("j1_forecast")
+    assert repo.get_job("j1_forecast") is None
+
+
+def test_firestore_プライバシーゾーンを保存して読み戻せる():
+    repo = FirestoreObservationRepository(FakeFirestoreClient())
+    zone = PrivacyZone(zone_id="z1", lat=35.0, lon=139.0, radius_m=300, created_at=RUN_AT)
+    user = make_user().model_copy(update={"privacy_zones": [zone]})
+    repo.add_user(user)
+    assert repo.get_user("u1") == user
+
+
 # Cloud Storage
 
 
@@ -157,6 +198,18 @@ def test_gcs_取得とないキーはNone():
     store.put("k", b"data")
     assert store.get("k") == b"data"
     assert store.get("missing") is None
+
+
+def test_gcs_消せてないキーを消してもエラーにならない():
+    client = FakeStorageClient()
+    images = GcsBlobStore("bucket", "images/", client)
+    weather = GcsBlobStore("bucket", "weather/", client)
+    images.put("k", b"x")
+    weather.put("k", b"y")
+    images.delete("k")
+    images.delete("k")
+    assert images.get("k") is None
+    assert weather.get("k") == b"y"
 
 
 # Cloud Tasks

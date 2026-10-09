@@ -5,9 +5,10 @@ from google.cloud import firestore
 
 
 class FakeSnapshot:
-    def __init__(self, data: dict | None) -> None:
+    def __init__(self, data: dict | None, reference: "FakeDocument | None" = None) -> None:
         self.exists = data is not None
         self._data = data
+        self.reference = reference
 
     def to_dict(self) -> dict | None:
         return None if self._data is None else dict(self._data)
@@ -38,6 +39,10 @@ class FakeDocument:
     def get(self) -> FakeSnapshot:
         return FakeSnapshot(self._docs.get(self._id))
 
+    def delete(self) -> None:
+        # 本物の Firestore と同じく、ないドキュメントを消してもエラーにならない
+        self._docs.pop(self._id, None)
+
 
 class FakeQuery:
     def __init__(self, docs: dict, field_filter=None, limit: int | None = None) -> None:
@@ -54,8 +59,8 @@ class FakeQuery:
 
     def stream(self):
         found = [
-            FakeSnapshot(data)
-            for data in self._docs.values()
+            FakeSnapshot(data, FakeDocument(self._docs, doc_id))
+            for doc_id, data in self._docs.items()
             if data.get(self._filter.field_path) == self._filter.value
         ]
         return iter(found[: self._limit])
@@ -86,6 +91,11 @@ class FakeBlob:
         if self._name not in self._objects:
             raise NotFound("ありません")
         return self._objects[self._name]
+
+    def delete(self) -> None:
+        if self._name not in self._objects:
+            raise NotFound("ありません")
+        del self._objects[self._name]
 
 
 class FakeBucket:

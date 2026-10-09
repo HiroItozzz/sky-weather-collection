@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,8 @@ TABLE_URL = "https://www.jma.go.jp/bosai/amedas/const/amedastable.json"
 POINT_URL = "https://www.jma.go.jp/bosai/amedas/data/point/{code}/{date}_{hh}.json"
 TABLE_KEY = "cache/amedas/amedastable.json.gz"
 TABLE_MAX_AGE = timedelta(days=7)
+# 地点番号は URL に入れるので、5桁の半角数字だけを受け付ける
+STATION_CODE = re.compile(r"\d{5}", re.ASCII)
 STATION_COUNT = 3
 EARTH_RADIUS_KM = 6371.0
 JST = timezone(timedelta(hours=9))
@@ -97,8 +100,9 @@ def select_stations(table: dict, lat: float, lon: float) -> list[dict]:
     """撮影地点に近い順に、最寄りの3地点を返す。
 
     `elems` の2文字目が `1` の地点（降水量を観測している地点）を優先する。
-    該当する地点が1つもなければ、全地点から選ぶ。
+    該当する地点が1つもなければ、全地点から選ぶ。地点番号が5桁の数字でないものは捨てる。
     """
+    table = {code: s for code, s in table.items() if STATION_CODE.fullmatch(code)}
     rain = {code: s for code, s in table.items() if str(s.get("elems", ""))[1:2] == "1"}
     candidates = rain or table
     stations = []

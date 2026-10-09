@@ -22,6 +22,31 @@ uv run python -m sky_server.admin revoke-user --user-id <user_id>
 
 `create-user` は `user_id` と招待コードを表示する。招待コードはこのときの1回しか表示されない。サーバーにはそのハッシュだけが保存される。
 
+### プライバシーゾーン、公開への同意、データの削除
+
+`docs/design.md` の 8節で「最初から用意しておくもの」とした操作。仕様は `docs/server-security.md` の 4節にある。
+
+```sh
+# プライバシーゾーン（公開版を作るときに、この範囲で撮った写真の位置を消す）
+uv run python -m sky_server.admin add-privacy-zone --user-id <user_id> --lat 35.68 --lon 139.76 --radius-m 500 --label 自宅
+uv run python -m sky_server.admin list-privacy-zones --user-id <user_id>
+uv run python -m sky_server.admin delete-privacy-zone --user-id <user_id> --zone-id <zone_id>
+
+# 公開データに含めてよいかの同意
+uv run python -m sky_server.admin set-consent --user-id <user_id> --public yes
+
+# 撮影者と、その観測・画像・天気データ・ジョブをすべて消す（--yes がなければ件数を表示するだけ）
+uv run python -m sky_server.admin delete-user --user-id <user_id>
+uv run python -m sky_server.admin delete-user --user-id <user_id> --yes
+```
+
+`delete-user` が途中で失敗したときは、もう一度実行すれば残りを消せる。
+
+### 送信の上限と検査
+
+- 撮影者ごとに、1日（UTC）に新しく受け付ける観測は `SKY_DAILY_UPLOAD_LIMIT` 件（既定 100）まで。超えると 429 を返す。再送（すでにある観測）は上限を超えていても受け付ける。
+- アップロードは、本文を読む前に大きさ（Content-Length が 11MB を超えたら 413）と招待コード（401）を確かめる。
+
 ## curl でアップロードを試す
 
 `TOKEN` に `create-user` で表示された招待コードを入れる。

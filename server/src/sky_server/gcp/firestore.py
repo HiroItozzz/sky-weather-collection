@@ -69,6 +69,23 @@ class FirestoreObservationRepository(ObservationRepository):
             {"user_id": user_id, "day": day, "count": firestore.Increment(1)}, merge=True
         )
 
+    def list_observations_by_user(self, user_id: str) -> list[dict]:
+        query = self._client.collection(OBSERVATIONS).where(
+            filter=FieldFilter("user_id", "==", user_id)
+        )
+        return [snapshot.to_dict() for snapshot in query.stream()]
+
+    def delete_observation(self, observation_id: str) -> None:
+        self._client.collection(OBSERVATIONS).document(observation_id).delete()
+
+    def delete_daily_counts(self, user_id: str) -> None:
+        query = self._client.collection(USAGE).where(filter=FieldFilter("user_id", "==", user_id))
+        for snapshot in list(query.stream()):
+            snapshot.reference.delete()
+
+    def delete_user(self, user_id: str) -> None:
+        self._client.collection(USERS).document(user_id).delete()
+
 
 class FirestoreJobRepository(JobRepository):
     """ジョブは `weather_jobs` に保存する。実行の重複はローカル版と同じく許容する。"""
@@ -85,3 +102,6 @@ class FirestoreJobRepository(JobRepository):
 
     def update_job(self, job: WeatherJob) -> None:
         self._client.collection(WEATHER_JOBS).document(job.job_id).set(job.model_dump(mode="json"))
+
+    def delete_job(self, job_id: str) -> None:
+        self._client.collection(WEATHER_JOBS).document(job_id).delete()
