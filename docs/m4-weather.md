@@ -87,7 +87,7 @@ JobRunner.run(job_id)
 - `TaskScheduler`：「この時刻にこのジョブを実行してほしい」という予約。
   - `schedule(job_id, run_at) -> None`：失敗したら例外を投げる。
   - ローカル版は `SKY_DATA_DIR/tasks/{job_id}.json` に `{"job_id": ..., "run_at": ...}` を書く（同じジョブの予約は上書きする）。
-  - ローカル版には `due(now) -> list[str]`（期限が来た job_id を `run_at` の古い順に返す）と `remove(job_id, run_at)`（予約の `run_at` が一致するときだけ消す）も持たせる。これらは管理コマンドだけが使う。
+  - ローカル版には `due(now) -> list[tuple[str, datetime]]`（期限が来た `(job_id, run_at)` を `run_at` の古い順に返す）と `remove(job_id, run_at)`（予約の `run_at` が一致するときだけ消す）も持たせる。これらは管理コマンドだけが使う。
 
 ### 3.2 PUT のときの予約（`ensure_weather_jobs`）
 
@@ -113,6 +113,7 @@ PUT が 201（新規）と 200（再送）のどちらのときも、次の手�
    - 成功：生レスポンスを保存して `done`、`blob_key` と `completed_at` を入れる。
    - 再試行できる失敗（4.1節）：そのプロバイダーは `pending` のまま。`error` と、ジョブの `last_error` に内容を入れる。次のプロバイダーには進む。
    - 再試行できない失敗：そのプロバイダーを `failed` にする。
+   - それ以外の想定外の例外（応答の形が想定と違うなど）は、再試行できる失敗と同じに扱う。待ち時間と `max_attempts` を効かせて、同じ失敗を際限なく繰り返さないようにするため。
 7. すべてのプロバイダーが `pending` でなくなったら、ジョブを完了にする（`failed` が1つでもあれば `failed`、なければ `done`）。`completed_at` を入れ、`next_attempt_at` を null にする。
 8. まだ `pending` のプロバイダーがあり、`attempts >= max_attempts` なら、残りを `failed`（`error: "max_attempts"` を末尾に足す）にしてジョブを `failed` にする。
 9. それ以外は `next_attempt_at = now + 待ち時間(attempts)`、`enqueued = false` で保存してから、`schedule` を呼び、成功したら `enqueued = true` で保存する。予約に失敗したら例外をそのまま上に投げる（HTTP なら 500 になり、Cloud Tasks が同じ配達をやり直す。そのとき手順 3 で予約し直される）。
