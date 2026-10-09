@@ -117,7 +117,7 @@ class Env:
         return record
 
     def ensure(self, record: dict) -> None:
-        ensure_weather_jobs(record, self.jobs, self.scheduler, RECEIVED_AT)
+        ensure_weather_jobs(record, self.jobs, self.scheduler, self.observations, RECEIVED_AT)
 
 
 @pytest.fixture
@@ -746,3 +746,119 @@ def test_doneのジョブで要約が失敗しても観測の既存の値は書�
     env.runner.run(FORECAST_ID, RECEIVED_AT)
     assert env.jobs.get_job(FORECAST_ID).status == "done"
     assert env.observations.get_observation(OBSERVATION_ID)["weather_at_capture"] == old_weather
+
+
+# label_done
+
+
+def test_labelが完了すると観測にlabel_doneが書かれる(summary_env, fake_summary):
+    env = summary_env
+    env.ensure(env.add_observation())
+    assert "label_done" not in env.observations.get_observation(OBSERVATION_ID)
+    env.runner.run(LABEL_ID, LABEL_RUN_AT)
+    assert env.observations.get_observation(OBSERVATION_ID)["label_done"] is True
+
+
+def test_forecastが完了してもlabel_doneは書かれない(summary_env, fake_summary):
+    env = summary_env
+    env.ensure(env.add_observation())
+    env.runner.run(FORECAST_ID, RECEIVED_AT)
+    assert "label_done" not in env.observations.get_observation(OBSERVATION_ID)
+
+
+def test_labelがfailedでもlabel_doneが書かれる(summary_env, fake_summary):
+    env = summary_env
+    env.amedas.outcomes = [PermanentError("HTTP 400: bad")]
+    env.ensure(env.add_observation())
+    env.runner.run(LABEL_ID, LABEL_RUN_AT)
+    assert env.jobs.get_job(LABEL_ID).status == "failed"
+    assert env.observations.get_observation(OBSERVATION_ID)["label_done"] is True
+
+
+def test_要約の計算に失敗してもlabel_doneは書かれる(summary_env, fake_summary):
+    env = summary_env
+    fake_summary.error = RuntimeError("計算できない")
+    env.ensure(env.add_observation())
+    env.runner.run(LABEL_ID, LABEL_RUN_AT)
+    record = env.observations.get_observation(OBSERVATION_ID)
+    assert env.jobs.get_job(LABEL_ID).summary is None
+    assert record["label_done"] is True
+    assert "answer" not in record
+
+
+def test_要約を作らない設定でもlabel_doneは書かれる(env):
+    env.ensure(env.add_observation())
+    env.runner.run(LABEL_ID, LABEL_RUN_AT)
+    assert env.observations.get_observation(OBSERVATION_ID)["label_done"] is True
+
+
+def test_再試行に回るあいだはlabel_doneを書かない(env):
+    env.open_meteo.outcomes = [RetryableError("HTTP 503")]
+    env.ensure(env.add_observation())
+    env.runner.run(LABEL_ID, LABEL_RUN_AT)
+    assert env.jobs.get_job(LABEL_ID).status == "pending"
+    assert "label_done" not in env.observations.get_observation(OBSERVATION_ID)
+
+
+def test_実行時に位置がなくてskippedになってもlabel_doneが書かれる(env):
+    env.ensure(env.add_observation())
+    path = env.observations._observations / f"{OBSERVATION_ID}.json"
+    record = json.loads(path.read_text())
+    record["location"] = None
+    path.write_text(json.dumps(record))
+    env.runner.run(LABEL_ID, LABEL_RUN_AT)
+    assert env.jobs.get_job(LABEL_ID).status == "skipped"
+    assert env.observations.get_observation(OBSERVATION_ID)["label_done"] is True
+
+
+def test_位置がない観測は作成時にlabel_doneが書かれる(env):
+    record = env.add_observation(location=False)
+    env.ensure(record)
+    assert env.jobs.get_job(LABEL_ID).status == "skipped"
+    assert env.observations.get_observation(OBSERVATION_ID)["label_done"] is True
+
+
+def test_位置がある観測は作成時にlabel_doneを書かない(env):
+    env.ensure(env.add_observation())
+    assert "label_done" not in env.observations.get_observation(OBSERVATION_ID)
+
+
+def test_label_doneを書けなくてもジョブの状態は変わらずログだけ出る(
+    summary_env, fake_summary, monkeypatch, caplog
+):
+    env = summary_env
+    original = env.observations.update_observation_fields
+
+    def broken(observation_id, fields):
+        if "label_done" in fields:
+            raise ConnectionError("書き込めない")
+        original(observation_id, fields)
+
+    monkeypatch.setattr(env.observations, "update_observation_fields", broken)
+    env.ensure(env.add_observation())
+    with caplog.at_level(logging.ERROR):
+        assert env.runner.run(LABEL_ID, LABEL_RUN_AT) == ("ran", None)
+    job = env.jobs.get_job(LABEL_ID)
+    assert job.status == "done"
+    assert job.summary == {"answer": RAIN_ANSWER}
+    assert "書き込めない" in caplog.text
+    assert LABEL_ID in caplog.text
+
+
+def test_作成時のlabel_doneを書けなくても例外にならずジョブは残り再送で書き直される(
+    env, monkeypatch, caplog
+):
+    record = env.add_observation(location=False)
+    original = env.observations.update_observation_fields
+
+    def broken(observation_id, fields):
+        raise ConnectionError("書き込めない")
+
+    monkeypatch.setattr(env.observations, "update_observation_fields", broken)
+    with caplog.at_level(logging.ERROR):
+        env.ensure(record)
+    assert env.jobs.get_job(LABEL_ID).status == "skipped"
+    assert "書き込めない" in caplog.text
+    monkeypatch.setattr(env.observations, "update_observation_fields", original)
+    env.ensure(env.observations.get_observation(OBSERVATION_ID))
+    assert env.observations.get_observation(OBSERVATION_ID)["label_done"] is True

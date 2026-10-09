@@ -215,14 +215,19 @@ def rebuild_summaries(
     job_repository: JobRepository,
     summarizer: Summarizer,
 ) -> tuple[int, int]:
-    """すべての観測の `captured_at_utc` を補い、完了したジョブの要約を計算し直す。
+    """すべての観測の `captured_at_utc` と `label_done` を補い、完了したジョブの要約を計算し直す。
 
     1件の失敗で止めず、`(処理した観測の数, 失敗した観測の数)` を返す。
+    要約の計算や観測への書き込みに失敗したジョブには、何も書かない（前の要約を残す）。
+    先に観測の ID をすべて読んでから1件ずつ処理するので、処理の途中で観測が増えても減っても
+    止まらない（増えた分はこの回では処理せず、消えた分は数えない）。
     """
     processed = failed = 0
-    for record in repository.list_all_observations():
+    for observation_id in repository.list_all_observation_ids():
+        record = repository.get_observation(observation_id)
+        if record is None:
+            continue
         processed += 1
-        observation_id = record["observation_id"]
         try:
             if "captured_at_utc" not in record:
                 captured_at_utc = to_utc_millis(_parse_time(record["captured_at"]))
@@ -230,14 +235,24 @@ def rebuild_summaries(
                     observation_id, {"captured_at_utc": captured_at_utc}
                 )
             ok = True
+            label_finished = False
             for phase in PHASES:
                 job = job_repository.get_job(f"{observation_id}_{phase}")
-                if job is None or job.status not in ("done", "failed"):
+                if job is None:
                     continue
-                # save_summary は失敗しても例外を投げないので、成功したかを summary で見分ける
+                if phase == "label" and job.status in ("done", "failed", "skipped"):
+                    label_finished = True
+                if job.status not in ("done", "failed"):
+                    continue
+                # save_summary は失敗しても例外を投げないので、成功したかを summary で見分ける。
+                # 失敗したときは、ジョブを保存しない（観測にも書かれていない）
                 save_summary(job, record, summarizer, repository)
+                if job.summary is None:
+                    ok = False
+                    continue
                 job_repository.update_job(job)
-                ok = ok and job.summary is not None
+            if label_finished and not record.get("label_done"):
+                repository.update_observation_fields(observation_id, {"label_done": True})
         except Exception as e:
             print(f"{observation_id} error {type(e).__name__}: {e}", file=sys.stderr)
             failed += 1

@@ -4,6 +4,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from conftest import IMAGE, OBSERVATION_ID, make_metadata
 
+from sky_server.models import to_utc_millis
+
 
 def test_新規は201で画像とメタデータが保存される(api, token, data_dir):
     res = api.put(token)
@@ -180,3 +182,33 @@ def test_画像の先頭がJPEGの印でなければ422(api, token):
 
 def test_画像の先頭が途中まで合っていても422(api, token):
     assert api.put(token, image=b"\xff\xd8\x00rest").status_code == 422
+
+
+def test_撮影時刻が2020年より前なら422(api, token):
+    meta = make_metadata()
+    meta["captured_at"] = "2019-12-31T23:59:59.999Z"
+    assert api.put(token, meta).status_code == 422
+
+
+def test_撮影時刻が2020年ちょうどなら受け付ける(api, token):
+    meta = make_metadata()
+    meta["captured_at"] = "2020-01-01T00:00:00Z"
+    assert api.put(token, meta).status_code == 201
+    assert api.repository.get_observation(OBSERVATION_ID)["captured_at_utc"] == (
+        "2020-01-01T00:00:00.000Z"
+    )
+
+
+@pytest.mark.parametrize(
+    "captured_at",
+    ["0001-01-01T00:00:00Z", "0001-01-01T00:00:00+09:00", "0001-01-01T00:00:00-14:00"],
+)
+def test_撮影時刻が0001年でも500にならず422(api, token, captured_at):
+    meta = make_metadata()
+    meta["captured_at"] = captured_at
+    assert api.put(token, meta).status_code == 422
+
+
+def test_UTCの年は4桁で書く():
+    assert to_utc_millis(datetime(1, 1, 1, tzinfo=UTC)) == "0001-01-01T00:00:00.000Z"
+    assert to_utc_millis(datetime(2020, 1, 1, tzinfo=UTC)) == "2020-01-01T00:00:00.000Z"

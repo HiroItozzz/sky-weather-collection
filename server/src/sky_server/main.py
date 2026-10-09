@@ -119,7 +119,7 @@ def create_app(
     def reserve_weather_jobs(record: dict) -> None:
         """天気ジョブを用意する。予約に失敗したら 503 にして、再送でやり直してもらう。"""
         try:
-            ensure_weather_jobs(record, job_repository, scheduler)
+            ensure_weather_jobs(record, job_repository, scheduler, repository)
         except Exception as e:
             raise HTTPException(
                 503, "天気データの取得の予約に失敗しました。しばらくしてからもう一度送ってください"
@@ -208,7 +208,7 @@ def create_app(
     def list_my_observations(
         user: CurrentUser,
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
-        before: str | None = None,
+        before: Annotated[str | None, Query(max_length=128)] = None,
     ) -> dict:
         cursor = None if before is None else _decode_cursor(before)
         # 次のページがあるかを知るために、1件多く読む
@@ -251,13 +251,15 @@ def _observation_view(record: dict) -> dict:
     from sky_server.summary import is_correct
 
     answer = record.get("answer") or UNKNOWN_ANSWER
+    # 答えを待っているかは、答えの有無ではなく label_done で決める
+    pending = record.get("label_done") is not True
     return {
         "observation_id": record["observation_id"],
         "received_at": record["received_at"],
         "captured_at": record["captured_at"],
         "user_guess": record.get("user_guess"),
         "weather_at_capture": record.get("weather_at_capture"),
-        "answer": answer,
+        "answer": {**answer, "pending": pending},
         "correct": is_correct(record.get("user_guess"), answer),
     }
 

@@ -88,12 +88,15 @@ def test_ない観測の書き換えは例外(env):
     assert env.repository.get_observation(oid(1)) is None
 
 
-def test_すべての観測を撮影者を問わず読める(env):
+def test_すべての観測のIDを撮影者を問わず読める(env):
     other, _ = create_user(env.repository, "bob")
     env.add(1)
     env.repository.add_observation(make_record(2, other.user_id))
-    ids = {record["observation_id"] for record in env.repository.list_all_observations()}
-    assert ids == {oid(1), oid(2)}
+    assert sorted(env.repository.list_all_observation_ids()) == [oid(1), oid(2)]
+
+
+def test_観測がなければIDの一覧は空(env):
+    assert env.repository.list_all_observation_ids() == []
 
 
 def test_ページは新しい順で同じ時刻ならIDの降順(env):
@@ -138,6 +141,7 @@ def test_一覧は新しい順で表示の形になっている(env):
         user_guess="rain",
         weather_at_capture=WEATHER_AT_CAPTURE,
         answer=RAIN_ANSWER,
+        label_done=True,
     )
     res = env.get("/v1/me/observations")
     assert res.status_code == 200
@@ -150,7 +154,7 @@ def test_一覧は新しい順で表示の形になっている(env):
             "captured_at": "2026-10-09T10:00:00+09:00",
             "user_guess": "rain",
             "weather_at_capture": WEATHER_AT_CAPTURE,
-            "answer": RAIN_ANSWER,
+            "answer": {**RAIN_ANSWER, "pending": False},
             "correct": True,
         },
         {
@@ -159,7 +163,7 @@ def test_一覧は新しい順で表示の形になっている(env):
             "captured_at": "2026-10-09T10:00:00+09:00",
             "user_guess": None,
             "weather_at_capture": None,
-            "answer": {"result": "unknown", "source": None},
+            "answer": {"result": "unknown", "source": None, "pending": True},
             "correct": None,
         },
     ]
@@ -319,10 +323,16 @@ def test_他人の観測は記録に数えない(env):
 
 
 def test_1件の表示は要約があればそれを返す(env):
-    env.add(1, user_guess="no_rain", weather_at_capture=WEATHER_AT_CAPTURE, answer=RAIN_ANSWER)
+    env.add(
+        1,
+        user_guess="no_rain",
+        weather_at_capture=WEATHER_AT_CAPTURE,
+        answer=RAIN_ANSWER,
+        label_done=True,
+    )
     body = env.get(f"/v1/observations/{oid(1)}").json()
     assert body["weather_at_capture"] == WEATHER_AT_CAPTURE
-    assert body["answer"] == RAIN_ANSWER
+    assert body["answer"] == {**RAIN_ANSWER, "pending": False}
     assert body["user_guess"] == "no_rain"
     assert body["correct"] is False
 
@@ -335,9 +345,57 @@ def test_1件の表示は要約がなければnullと不明を返す(env):
         "captured_at": "2026-10-09T10:00:00+09:00",
         "user_guess": None,
         "weather_at_capture": None,
-        "answer": {"result": "unknown", "source": None},
+        "answer": {"result": "unknown", "source": None, "pending": True},
         "correct": None,
     }
+
+
+def test_pendingはlabel_doneがtrueでなければtrue(env):
+    # 答えがあっても label_done がなければ待ち。答えがなくても label_done があれば待たない
+    env.add(1, answer=RAIN_ANSWER)
+    env.add(2, label_done=True)
+    env.add(3, label_done=False)
+    env.add(4, label_done=None)
+    env.add(5, answer=RAIN_ANSWER, label_done=True)
+    expected = {1: True, 2: False, 3: True, 4: True, 5: False}
+    for n, pending in expected.items():
+        assert env.get(f"/v1/observations/{oid(n)}").json()["answer"]["pending"] is pending
+    listed = env.get("/v1/me/observations").json()["observations"]
+    assert {r["observation_id"]: r["answer"]["pending"] for r in listed} == {
+        oid(n): pending for n, pending in expected.items()
+    }
+
+
+def test_pendingがあっても記録の数え方は変わらない(env):
+    env.add(1, answer={"result": "unknown", "source": None})
+    env.add(2, answer={"result": "unknown", "source": None}, label_done=True)
+    body = env.get("/v1/me/stats").json()
+    assert body["observations_total"] == 2
+    assert body["answered_total"] == 0
+    assert body["by_category"] == {"clear": 0, "cloudy": 0, "rain": 0, "unknown": 2}
+
+
+def test_beforeは128文字まで(env):
+    env.add(1)
+    assert env.get("/v1/me/observations", before="A" * 128).status_code == 422  # カーソルとして不正
+    res = env.get("/v1/me/observations", before="A" * 129)
+    assert res.status_code == 422
+    # 長さの制限で弾かれている（カーソルの検査まで進んでいない）
+    assert res.json()["detail"][0]["type"] == "string_too_long"
+
+
+def test_深い入れ子のJSONのカーソルは422(env):
+    env.add(1)
+    # base64 にして 128 文字以内に収まる、いちばん深い入れ子（96 バイト = 開きと閉じを 48 ずつ）
+    depth = 48
+    before = encode(json.loads("[" * depth + "]" * depth))
+    assert len(before) <= 128
+    assert env.get("/v1/me/observations", before=before).status_code == 422
+    # Python の再帰の上限を超える深さは、長さの制限で弾かれて読み込みまで進まない
+    deep = ("[" * 5000 + "]" * 5000).encode()
+    before = base64.urlsafe_b64encode(deep).decode().rstrip("=")
+    assert len(before) > 128
+    assert env.get("/v1/me/observations", before=before).status_code == 422
 
 
 def test_他人の観測とない観測は404(env):

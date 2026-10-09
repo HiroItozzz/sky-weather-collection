@@ -5,7 +5,6 @@ import os
 import shutil
 import tempfile
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
 from pathlib import Path
 
 from sky_server.models import User
@@ -60,8 +59,8 @@ class ObservationRepository(ABC):
         """
 
     @abstractmethod
-    def list_all_observations(self) -> Iterator[dict]:
-        """すべての観測を返す（撮影者を問わない）。"""
+    def list_all_observation_ids(self) -> list[str]:
+        """すべての観測の ID を返す（撮影者を問わない）。"""
 
     @abstractmethod
     def delete_observation(self, observation_id: str) -> None:
@@ -178,11 +177,8 @@ class LocalObservationRepository(ObservationRepository):
             records = [r for r in records if (r["captured_at_utc"], r["observation_id"]) < before]
         return records[:limit]
 
-    def list_all_observations(self) -> Iterator[dict]:
-        # 呼び出し側が書き換えながら読んでも問題ないように、先にファイルの一覧を固める
-        for path in sorted(self._observations.glob("*.json")):
-            if path.exists():
-                yield json.loads(path.read_text(encoding="utf-8"))
+    def list_all_observation_ids(self) -> list[str]:
+        return sorted(path.stem for path in self._observations.glob("*.json"))
 
     def delete_observation(self, observation_id: str) -> None:
         (self._observations / f"{observation_id}.json").unlink(missing_ok=True)

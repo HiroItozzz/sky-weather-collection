@@ -136,8 +136,9 @@ def test_firestore_天気ジョブの用意がそのまま動く():
     tasks = CloudTasksScheduler("p", "us-central1", "q", URL, SERVICE_ACCOUNT, FakeTasksClient())
     meta = ObservationMetadata.model_validate(make_metadata())
     record = meta.with_server_fields("u1", RUN_AT, "key.jpg")
-    ensure_weather_jobs(record, jobs, tasks)
-    ensure_weather_jobs(record, jobs, tasks)
+    observations = FirestoreObservationRepository(FakeFirestoreClient())
+    ensure_weather_jobs(record, jobs, tasks, observations)
+    ensure_weather_jobs(record, jobs, tasks, observations)
     job = jobs.get_job(f"{meta.observation_id}_label")
     assert job.enqueued is True
 

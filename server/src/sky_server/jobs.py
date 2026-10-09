@@ -189,6 +189,19 @@ def _new_job(record: dict, phase: str, now: datetime) -> WeatherJob:
     return job
 
 
+def mark_label_done(job: WeatherJob, observations: ObservationRepository) -> None:
+    """`label` のジョブが終わったことを、観測の `label_done` に書く。
+
+    書き込みに失敗しても、ジョブの状態は変えずにログだけ出す。`label` 以外のジョブでは何もしない。
+    """
+    if job.phase != "label":
+        return
+    try:
+        observations.update_observation_fields(job.observation_id, {"label_done": True})
+    except Exception:
+        logger.exception("label_done を書けませんでした: %s", job.job_id)
+
+
 def _enqueue(job: WeatherJob, jobs: JobRepository, scheduler: TaskScheduler) -> None:
     """予約して、成功したら `enqueued` を true にして保存する。失敗したら例外をそのまま投げる。"""
     scheduler.schedule(job.job_id, job.next_attempt_at)
@@ -200,9 +213,13 @@ def ensure_weather_jobs(
     record: dict,
     jobs: JobRepository,
     scheduler: TaskScheduler,
+    observations: ObservationRepository,
     now: datetime | None = None,
 ) -> None:
     """観測の2つのジョブを用意し、予約できていないものを予約する。何度呼んでも結果は同じ。
+
+    作成時に `skipped` になった `label` のジョブは、観測に `label_done` を書く。
+    書けなくても、ログだけ出して続ける。
 
     予約に失敗したら例外を投げる（呼び出し側が 503 にする）。
     """
@@ -214,6 +231,10 @@ def ensure_weather_jobs(
         if not jobs.add_job(job):
             job = jobs.get_job(job.job_id)
         ensured.append(job)
+    for job in ensured:
+        # 再送のときも、前に書けなかった label_done を書き直す
+        if job.status == "skipped" and not record.get("label_done"):
+            mark_label_done(job, observations)
     for job in ensured:
         if job.status == "pending" and not job.enqueued:
             _enqueue(job, jobs, scheduler)
@@ -316,11 +337,13 @@ class JobRunner:
         if record is None:
             job.last_error = "observation_not_found"
             _finish(job, "failed", now)
+            # 観測がないので、label_done は書けない
             self._jobs.update_job(job)
             return "ran", "observation_not_found"
         location = record.get("location")
         if location is None:
             _finish(job, "skipped", now, skip_reason="no_location")
+            mark_label_done(job, self._observations)
             self._jobs.update_job(job)
             return "ran", "no_location"
 
@@ -380,6 +403,7 @@ class JobRunner:
     def _summarize(self, job: WeatherJob, record: dict) -> None:
         if self._summarizer is not None:
             save_summary(job, record, self._summarizer, self._observations)
+        mark_label_done(job, self._observations)
 
 
 def _finish(

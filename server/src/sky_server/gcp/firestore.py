@@ -1,7 +1,5 @@
 """Firestore を使う保存先（M4 の GCP 版）。"""
 
-from collections.abc import Iterator
-
 from google.api_core.exceptions import AlreadyExists
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -94,9 +92,12 @@ class FirestoreObservationRepository(ObservationRepository):
             query = query.start_after({"captured_at_utc": before[0], "observation_id": before[1]})
         return [snapshot.to_dict() for snapshot in query.limit(limit).stream()]
 
-    def list_all_observations(self) -> Iterator[dict]:
-        for snapshot in self._client.collection(OBSERVATIONS).stream():
-            yield snapshot.to_dict()
+    def list_all_observation_ids(self) -> list[str]:
+        # ストリームを開いたまま処理しないよう、ここで最後まで読み切る
+        return [
+            snapshot.to_dict()["observation_id"]
+            for snapshot in self._client.collection(OBSERVATIONS).stream()
+        ]
 
     def delete_observation(self, observation_id: str) -> None:
         self._client.collection(OBSERVATIONS).document(observation_id).delete()

@@ -19,7 +19,7 @@ def test_自分の観測を取得できる(api, token, fake_summary):
         "captured_at": record["captured_at"],
         "user_guess": None,
         "weather_at_capture": None,
-        "answer": {"result": "unknown", "source": None},
+        "answer": {"result": "unknown", "source": None, "pending": True},
         "correct": None,
     }
 
