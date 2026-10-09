@@ -214,7 +214,8 @@ M1 では、7節の API のうち天気データの取得以外を、ローカ�
   - 同じ ID で、同じ撮影者・同じ `image_sha256` の観測がすでにあれば、何も変えずに 200 を返す（再送とみなす）。
   - 同じ ID で、撮影者か `image_sha256` が違えば 409。
   - 新規なら保存して 201。
-- サーバーが付け加えて保存する項目：`user_id`、`received_at`（UTC）。
+- サーバーが付け加えて保存する項目：`user_id`、`received_at`（UTC）、`image_key`。
+- 画像のキーは `{observation_id}/{image_sha256}.jpg` にする。同じ ID で別の画像が同時に届いても、互いに上書きしないようにするため。
 - 応答の本文：`{"observation_id": "...", "status": "created"}`（200 のときは `"exists"`）。
 
 ### `GET /v1/observations/{observation_id}`
