@@ -340,10 +340,15 @@ server/src/sky_server/
   - `name`：`{queue のパス}/tasks/{job_id}-{run_at の UNIX 秒}`。同じ予約を二重に作らないため。`AlreadyExists` なら予約済みとみなして成功にする。
   - `schedule_time`：`run_at`。
   - `http_request`：`POST SKY_TASKS_TARGET_URL`、本文 `{"job_id": ...}`、`Content-Type: application/json`、`oidc_token`（`service_account_email` は `SKY_TASKS_SERVICE_ACCOUNT`、`audience` は `SKY_TASKS_TARGET_URL`）。
+- 同じ観測の再送が同時に2つ届くと、両方が `schedule` を呼ぶことがある。`job_id` と `run_at` が同じなのでタスク名も同じになり、2つ目は Cloud Tasks に `AlreadyExists` で弾かれる（Cloud Tasks のドキュメントによれば、タスクが残っている間と、実行・削除されたあともしばらくの間は、同じ名前のタスクを作れない）。実際のサービスでは確かめていない。名前を付けたタスクは作成が少し遅くなることがあるが、この用途では問題にならない。
 - キューの再試行の設定（手順書で作る）：アプリが 500 を返したときだけ使われる。最大5回、最小の間隔 60 秒。同時に送る数は1、1秒あたり1件まで（アメダスへの負荷を抑えるため）。
 - `run-due-jobs` は `gcp` では使わない（Cloud Tasks が呼ぶため）。`SKY_BACKEND=gcp` で実行したらエラーで終わる。
 
-### 10.5 予定より少し早く届いたとき
+### 10.5 PUT を同期の関数にする
+
+Firestore と Cloud Tasks のクライアントは同期（呼ぶと結果が返るまで待つ）なので、`PUT /v1/observations/{id}` は `async def` ではなく `def` にする。FastAPI は `def` のエンドポイントをスレッドプールで動かすので、保存先を待つ間もほかのリクエストを受け付けられる。
+
+### 10.5.1 予定より少し早く届いたとき
 
 Cloud Tasks の時計とサーバーの時計は少しずれることがある。予約した時刻よりわずかに早く届くと、3.3節の手順 3 で `not_due` として捨てられ、`enqueued` が true のままなので、そのジョブは二度と実行されなくなる。これを防ぐため、手順 3 は `now < next_attempt_at - 2分` のときだけ `not_due` にする（ローカル版でも同じ）。
 

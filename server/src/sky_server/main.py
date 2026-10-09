@@ -96,8 +96,10 @@ def create_app(
     def healthz() -> dict:
         return {"status": "ok"}
 
+    # 保存先（Firestore、Cloud Tasks など）は同期のクライアントなので、async にせず
+    # スレッドプールで動かして、イベントループを止めないようにする
     @app.put("/v1/observations/{observation_id}")
-    async def put_observation(
+    def put_observation(
         observation_id: ObservationId,
         user: CurrentUser,
         metadata: Annotated[str, Form()],
@@ -107,7 +109,7 @@ def create_app(
 
         if image.content_type != "image/jpeg":
             raise HTTPException(422, "image は image/jpeg で送ってください")
-        data = await image.read(MAX_IMAGE_BYTES + 1)
+        data = image.file.read(MAX_IMAGE_BYTES + 1)
         if len(data) > MAX_IMAGE_BYTES:
             raise HTTPException(413, "画像が大きすぎます（上限は10MBです）")
 
