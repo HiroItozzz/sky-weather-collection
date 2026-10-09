@@ -33,7 +33,7 @@ class ObservationRepository(ABC):
 
 
 class BlobStore(ABC):
-    """画像の保存先。"""
+    """画像や天気データ（バイト列）の保存先。"""
 
     @abstractmethod
     def put(self, key: str, data: bytes) -> None: ...
@@ -89,8 +89,8 @@ class LocalObservationRepository(ObservationRepository):
 
 
 class LocalBlobStore(BlobStore):
-    def __init__(self, root: Path) -> None:
-        self._root = root / "images"
+    def __init__(self, root: Path, dirname: str = "images") -> None:
+        self._root = root / dirname
         self._root.mkdir(parents=True, exist_ok=True)
 
     def put(self, key: str, data: bytes) -> None:
