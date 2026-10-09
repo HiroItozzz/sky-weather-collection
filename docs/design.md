@@ -285,6 +285,7 @@ M1 では、7節の API のうち天気データの取得以外を、ローカ�
 ### 13.4 要約の保存
 
 - ジョブが `done` になったときに、13.2・13.3 の結果を計算してジョブの状態に `summary` として保存する。API を呼ぶたびに gzip の生レスポンスを読み直さないため。
+- 同じ要約を、観測のドキュメントにも `weather_at_capture` と `answer` として写す。一覧と集計が観測だけを読めば済むようにするため（Firestore の読み取りの回数を抑える）。
 - 要約の計算に失敗しても、ジョブは `done` のままにする（生レスポンスは保存できているので、あとで作り直せる）。要約は null にして、エラーをログに出す。
 - 要約の計算は、生レスポンスから何度でも作り直せる純粋な関数にする。管理コマンドで、全件の要約を作り直せるようにする。
 
@@ -306,10 +307,12 @@ M1 では、7節の API のうち天気データの取得以外を、ローカ�
   ```
   - `weather_at_capture` は 13.3 が null なら null。
   - `answer.result` は `rain` / `no_rain` / `unknown`。`correct` は、`user_guess` が null か `answer.result` が `unknown` なら null。
-- `GET /v1/me/observations?limit=50&before=<captured_at>`
-  - 自分の観測を `captured_at` の新しい順に返す。項目は上の GET と同じ。`limit` は 1〜100（既定 50）。
-  - 次のページがあれば `next_before` を返す。
-  - Firestore では `user_id` と `captured_at` の複合インデックスが必要になる。デプロイ手順書に追記する。
+- `GET /v1/me/observations?limit=50&before=<カーソル>`
+  - 自分の観測を撮影時刻の新しい順に返す。項目は上の GET と同じ。`limit` は 1〜100（既定 50）。
+  - 並び順と `before` には、サーバーが受け取ったときに足す `captured_at_utc`（UTC、ミリ秒、`Z` 付き）を使う。アプリが送る `captured_at` はタイムゾーンが混ざりうるので、文字列のままでは正しく並ばないため。応答の `captured_at` は今までどおり。
+  - 並び順は `captured_at_utc` の降順、同じ時刻なら `observation_id` の降順。ページの境目で同じ時刻の観測が抜けたり重複したりしないよう、`next_before` は `captured_at_utc` と `observation_id` を組み合わせたカーソルにする。アプリはカーソルの中身を解釈せず、そのまま次の `before` に渡す。
+  - 応答は `{"observations": [...], "next_before": "<カーソル>" | null}`。次のページがなければ `next_before` は null。
+  - Firestore では `user_id`（昇順）、`captured_at_utc`（降順）、`observation_id`（降順）の複合インデックスが必要になる。デプロイ手順書に追記する。
 - `GET /v1/me/stats`
   ```json
   {
