@@ -49,7 +49,7 @@ type ObservationView = {
   observation_id: string; received_at: string; captured_at: string;
   user_guess: "rain" | "no_rain" | null;
   weather_at_capture: WeatherAtCapture | null;
-  answer: { result: "rain" | "no_rain" | "unknown"; source: "amedas" | "open_meteo" | null };
+  answer: { result: "rain" | "no_rain" | "unknown"; source: "amedas" | "open_meteo" | null; pending: boolean };
   correct: boolean | null;
 };
 type ObservationPage = { observations: ObservationView[]; next_before: string | null };
@@ -63,6 +63,7 @@ type ApiResult<T> = { kind: "ok"; data: T } | { kind: "not_found" } | { kind: "a
   - `weather_at_capture` の `temperature_c` などの数値は null も許す（13.5 の例には null がないが、Open-Meteo の値が欠けることはある）。
 - 401 は `auth`、404 は `not_found`、それ以外の失敗（通信のエラー、5xx など）は `error`。打ち切りは 15 秒。
 - `before` は URL エンコードする（`+` を含む時刻がそのまま送られないように）。
+- `answer.pending`（答え合わせのジョブがまだ終わっていなければ true。設計メモ 13.2・13.5）がない、または bool でないときは true とみなす（項目を足す前のサーバーや、前に保存した表示用のキャッシュとの互換のため）。
 
 ## 5. 撮影時の天気の表示（13.6 の撮影画面）
 
@@ -88,7 +89,7 @@ type ApiResult<T> = { kind: "ok"; data: T } | { kind: "not_found" } | { kind: "a
 - `listObservations(limit 50)` で取った一覧を、新しい順に表示する。下に「もっと見る」（`next_before` があるときだけ。押すと続きを足す）。
 - 1件の表示：サムネイル（なければ代わりの四角）、撮影日時（端末のタイムゾーン、`2026/10/09 14:05` の形）、予想、答え、当たり外れ、撮影時の天気。
   - 予想：「降る」「降らない」「予想なし」。
-  - 答え：`rain` は「降った」、`no_rain` は「降らなかった」、`unknown` は「答え合わせ待ち（撮影の約6〜7時間後）」。
+  - 答え：`rain` は「降った」、`no_rain` は「降らなかった」。`unknown` は、`pending` が true なら「答え合わせ待ち（撮影の約6〜7時間後）」、false なら「答え合わせできませんでした」（ジョブは終わったが、アメダスも Open-Meteo も値がそろわなかった）。
   - 当たり外れ：`correct` が true は「当たり」、false は「はずれ」、null は表示しない。
 - 一覧の上に、端末に未送信のものがあれば「未送信 N 件（送れたら一覧に出ます）」。
 - 引っぱって更新（`RefreshControl`）。
@@ -115,7 +116,8 @@ type ApiResult<T> = { kind: "ok"; data: T } | { kind: "not_found" } | { kind: "a
 - `api.ts`：13.5 の例の JSON を偽の応答にして、3つの API が型どおりに返すこと。401・404・5xx・通信のエラー・形の違う応答・null を含む `weather_at_capture`・`before` のエンコード。
 - `pollWeather`：すぐ取れる、何回か 404 のあとに取れる、60 秒で諦める、401 でやめる、途中で止められる。
 - 表示用の関数（分類の名前、答えの文言、的中率、「特に貴重です」の判定、日時の形）。
-- e2e は、サーバー側の 13.5 がマージされてから足す（今回は足さない）。
+- `answer.pending` の読み方（false・true・ない・bool でない）と、それに応じた答えの文言。
+- e2e は、サーバー側の 13.5 がマージされてから足す。CI の e2e ではサーバーの天気の取得が動かないので、要約ができていない状態（`weather_at_capture` が null、`answer.result` が `unknown`、`pending` が true）を確かめる形にする。
 
 ### 7.2 実機で確かめる手順（ユーザー向け）
 

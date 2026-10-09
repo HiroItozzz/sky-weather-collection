@@ -15,7 +15,7 @@ const OBSERVATION = {
     precipitation_mm: 0.0,
     cloud_cover_pct: 90,
   },
-  answer: { result: "rain", source: "amedas" },
+  answer: { result: "rain", source: "amedas", pending: false },
   correct: true,
 };
 
@@ -64,6 +64,21 @@ describe("getObservation", () => {
     const f = fakeFetch(200, { ...OBSERVATION, extra: 1, answer: { ...OBSERVATION.answer, x: 2 } });
     const result = await createApiClient(f.impl).getObservation(SETTINGS, "abc");
     expect(result).toEqual({ kind: "ok", data: OBSERVATION });
+  });
+
+  it("answer.pending を読む。ない・bool でないときは true とみなす", async () => {
+    const client = (body: unknown) => createApiClient(fakeFetch(200, body).impl);
+    const unknown = { result: "unknown", source: null };
+    const cases: [unknown, boolean][] = [
+      [{ ...unknown, pending: false }, false],
+      [{ ...unknown, pending: true }, true],
+      [unknown, true],
+      [{ ...unknown, pending: "no" }, true],
+    ];
+    for (const [answer, expected] of cases) {
+      const result = await client({ ...OBSERVATION, answer }).getObservation(SETTINGS, "abc");
+      expect(result.kind === "ok" && result.data.answer.pending).toBe(expected);
+    }
   });
 
   it("id は URL エンコードする", async () => {
