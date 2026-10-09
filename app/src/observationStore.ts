@@ -2,7 +2,7 @@
 import * as Crypto from "expo-crypto";
 import { Directory, File, Paths } from "expo-file-system";
 import type { ExifInput } from "./exif";
-import { buildMetadata, type DeviceInfo, type ObservationMetadata } from "./metadata";
+import { buildMetadata, type DeviceInfo, type ObservationMetadata, type UserGuess } from "./metadata";
 import type { LocationInput, Sample } from "./record";
 import type { QueueItem, Status, Store } from "./uploadQueue";
 
@@ -123,6 +123,8 @@ export type SaveCaptureInput = {
   width: number | null | undefined;
   height: number | null | undefined;
   device: DeviceInfo;
+  /** シャッターを押した時点の予想 */
+  userGuess: UserGuess | null;
 };
 
 /**
@@ -153,6 +155,7 @@ export async function saveCapture(input: SaveCaptureInput): Promise<ObservationM
       height: input.height,
       device: input.device,
       imageSha256: toHex(digest),
+      userGuess: input.userGuess,
     });
     await writeAtomically(input.observationId, METADATA_NAME, JSON.stringify(metadata));
     return metadata;

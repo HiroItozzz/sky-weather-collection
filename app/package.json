@@ -9,6 +9,7 @@
     "expo-crypto": "~57.0.3",
     "expo-device": "~57.0.2",
     "expo-file-system": "~57.0.7",
+    "expo-image-manipulator": "~57.0.21",
     "expo-location": "~57.0.20",
     "expo-network": "~57.0.2",
     "expo-secure-store": "~57.0.4",

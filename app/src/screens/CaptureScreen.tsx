@@ -137,6 +137,7 @@ export default function CaptureScreen({ queue, queueState, onOpenSettings }: Pro
           model: Device.modelName,
           app_version: Constants.expoConfig?.version ?? null,
         },
+        userGuess: null,
       });
       setMessage(`保存しました（撮影 ${elapsedMs} ms）`);
       // 保存の完了後に件数を数え直し、送信を始める

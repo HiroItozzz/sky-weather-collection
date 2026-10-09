@@ -29,6 +29,7 @@ function input(overrides: Partial<MetadataInput> = {}): MetadataInput {
     height: 1,
     device: { platform: "android", os_version: "15", model: "Pixel 9", app_version: "1.0.0" },
     imageSha256: "a".repeat(64),
+    userGuess: null,
     ...overrides,
   };
 }
@@ -135,6 +136,12 @@ describe("buildMetadata", () => {
     expect(Object.is(buildMetadata(input()).tz_offset_min, 0)).toBe(true);
     jest.spyOn(Date.prototype, "getTimezoneOffset").mockReturnValue(300);
     expect(buildMetadata(input()).tz_offset_min).toBe(-300);
+  });
+
+  it("user_guess に予想を入れる", () => {
+    expect(buildMetadata(input({ userGuess: "rain" })).user_guess).toBe("rain");
+    expect(buildMetadata(input({ userGuess: "no_rain" })).user_guess).toBe("no_rain");
+    expect(buildMetadata(input({ userGuess: null })).user_guess).toBeNull();
   });
 
   it("端末の情報が取れないときは unknown", () => {
