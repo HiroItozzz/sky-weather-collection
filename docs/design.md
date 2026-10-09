@@ -308,7 +308,7 @@ M1 では、7節の API のうち天気データの取得以外を、ローカ�
   - `answer.result` は `rain` / `no_rain` / `unknown`。`correct` は、`user_guess` が null か `answer.result` が `unknown` なら null。
 - `GET /v1/me/observations?limit=50&before=<captured_at>`
   - 自分の観測を `captured_at` の新しい順に返す。項目は上の GET と同じ。`limit` は 1〜100（既定 50）。
-  - 次のページがあれば `next_before` を返す。
+  - 応答は `{"observations": [...], "next_before": "<captured_at>" | null}`。次のページがなければ `next_before` は null。
   - Firestore では `user_id` と `captured_at` の複合インデックスが必要になる。デプロイ手順書に追記する。
 - `GET /v1/me/stats`
   ```json
