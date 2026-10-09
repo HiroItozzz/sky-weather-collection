@@ -112,7 +112,6 @@ curl -i -X POST http://localhost:8000/internal/tasks/fetch-weather \
 | `SKY_OPEN_METEO_URL` | `https://api.open-meteo.com/v1/forecast` | Open-Meteo の URL |
 | `SKY_TASK_AUTH` | （なし＝すべて拒否） | 内部 API の認証。`none`（ローカル専用）か `oidc`（GCP 版） |
 | `SKY_DAILY_UPLOAD_LIMIT` | `100` | 撮影者ごとの1日（UTC）の新規の観測の上限。超えたら 429 |
-| `SKY_REQUIRE_CONTENT_LENGTH` | `0` | `1` で Content-Length のないアップロードを 411 にする |
 
 ### 生レスポンスの置き場所
 

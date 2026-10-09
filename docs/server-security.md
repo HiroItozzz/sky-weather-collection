@@ -11,19 +11,20 @@ FastAPI は、エンドポイントの依存（認証）を解決する前に mu
 1. Content-Length がある場合
    - 数字として読めなければ 400 を返す。
    - `MAX_UPLOAD_BYTES` を超えていれば 413 を返す。`MAX_UPLOAD_BYTES` は、画像の上限 10MB にメタデータと multipart の区切りの分として 1MB を足した値（11MB）。
-   - Content-Length がない場合の扱いは 1.1節。
+   - Content-Length がない場合は、ここでは何もしない（1.1節）。
 2. `Authorization: Bearer <招待コード>` を照合する。照合できなければ 401 を返す。リポジトリへの問い合わせは同期なので、スレッドプールで行う。照合できた撮影者は `scope["state"]["user"]` に入れ、エンドポイント側の認証はそれを使う（同じリクエストで2回問い合わせない）。
 3. 本文を読むときは、受け取ったバイト数を数える。`MAX_UPLOAD_BYTES` を超えたら、その時点で 413 を返して読むのをやめる。Content-Length を偽ったリクエストへの備え。
 
 - 応答の本文は、FastAPI の `HTTPException` と同じ形（`{"detail": "..."}`）にする。401 には `WWW-Authenticate: Bearer` を付ける。
 - 検査の順番は「大きさ → 認証 → 本文」。大きさの検査は資源を使わないので先に行い、問い合わせのある認証を後にする。
 
-### 1.1 Content-Length がないとき（監督に確認中）
+### 1.1 Content-Length がないとき
 
-アプリは React Native の `FormData` でファイルを送る。React Native の Android 版は Content-Length を付けるはずだが、確かめていない。付かない経路があるときに、アプリのすべての送信が「断られた」（M3 の分類で 411 は `rejected`）にならないように、既定では次のようにする。
+Content-Length がなくても 411 にはせず、受け付ける。ただし認証（手順 2）を先に通し、本文は手順 3 で数えながら打ち切る。
 
-- Content-Length がなくても受け付ける。ただし、認証（手順 2）を先に通し、本文は手順 3 で数えて打ち切る。
-- 設定 `SKY_REQUIRE_CONTENT_LENGTH=1` で、Content-Length がないリクエストを 411 にする。実機で Content-Length が付くことを確かめたら、こちらに切り替える。
+- アプリは React Native の `FormData` でファイルを送る。React Native の Android 版は Content-Length を付けるはずだが、確かめていない。付かない経路があると、M3 の分類では 411 が「断られた」（`rejected`）になり、すべての送信が失敗してしまう。
+- この方法でも、検査の目的（未認証のリクエストに本文を読ませない、大きさで資源を使わせない）は満たせる。そこで、アプリを壊す危険がないほうを選んだ（監督が決定）。411 にする設定の切り替え口は作らない。
+- 数えて打ち切る処理は、本文がちょうど上限なら通す、上限＋1バイトなら 413、Content-Length を小さく申告して上限を超えて送れば 413、の3つをテストする。
 
 ### 1.2 Cloud Run の設定
 
@@ -97,4 +98,3 @@ FastAPI は、エンドポイントの依存（認証）を解決する前に mu
 | 名前 | 既定 | 内容 |
 |---|---|---|
 | `SKY_DAILY_UPLOAD_LIMIT` | `100` | 撮影者ごとの1日（UTC）の新規の観測の上限 |
-| `SKY_REQUIRE_CONTENT_LENGTH` | `0` | `1` で Content-Length のないアップロードを 411 にする |
