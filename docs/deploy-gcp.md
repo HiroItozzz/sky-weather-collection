@@ -43,8 +43,11 @@ gcloud billing budgets create \
   --filter-projects=projects/$PROJECT_ID \
   --budget-amount=500JPY \
   --threshold-rule=percent=0.5 \
-  --threshold-rule=percent=1.0
+  --threshold-rule=percent=1.0 \
+  --threshold-rule=percent=1.0,basis=forecasted-spend
 ```
+
+最後のしきい値は、月末までの予測額が予算を超えそうになった時点で知らせる（実際に使った額が超える前に気づける）。
 
 ## 2. API を有効にする
 
@@ -106,6 +109,16 @@ gcloud iam service-accounts add-iam-policy-binding $TASKS_SA \
   --member=serviceAccount:$RUN_SA --role=roles/iam.serviceAccountUser
 ```
 
+付けるロールの一覧：
+
+| 誰に | どの範囲で | ロール | 何のため |
+|---|---|---|---|
+| `sky-server`（Cloud Run） | プロジェクト | `roles/datastore.user`（Cloud Datastore ユーザー） | Firestore の読み書き |
+| `sky-server` | バケット `$BUCKET` | `roles/storage.objectUser`（Storage オブジェクト ユーザー） | 画像と天気データの読み書き・削除 |
+| `sky-server` | キュー `$QUEUE` | `roles/cloudtasks.enqueuer`（Cloud Tasks エンキューア） | 天気ジョブの予約 |
+| `sky-server` | サービスアカウント `sky-tasks` | `roles/iam.serviceAccountUser`（サービス アカウント ユーザー） | `sky-tasks` の名前で OIDC トークンつきのタスクを作る |
+| `sky-tasks`（Cloud Tasks の呼び出し） | なし | なし | 内部 API はアプリがトークンのメールを確かめる |
+
 - 権限は、必要なものだけをできるだけ狭い範囲に付けている。プロジェクト全体の編集者などは付けない。
 - `sky-tasks` には権限を何も付けない。内部 API は、トークンのメールが `sky-tasks` であることをアプリで確かめる（`docs/m4-weather.md` 10.6節）。
 
@@ -130,12 +143,15 @@ gcloud run deploy $SERVICE \
   --allow-unauthenticated \
   --min-instances=0 \
   --max-instances=2 \
+  --concurrency=10 \
+  --timeout=120 \
   --memory=512Mi \
   --set-env-vars=SKY_BACKEND=gcp,SKY_GCP_PROJECT=$PROJECT_ID,SKY_GCS_BUCKET=$BUCKET,SKY_TASKS_LOCATION=$REGION,SKY_TASKS_QUEUE=$QUEUE,SKY_TASKS_TARGET_URL=$TASKS_URL,SKY_TASKS_SERVICE_ACCOUNT=$TASKS_SA,SKY_TASK_AUTH=oidc
 ```
 
 - 初回は Artifact Registry のリポジトリ（`cloud-run-source-deploy`）を作るか聞かれるので、`Y` と答える。
 - `--allow-unauthenticated` は、だれでも URL に届くようにする設定。アプリは招待コードで撮影者を確かめ、内部 API は OIDC トークンで確かめるので、Cloud Run 側の認証は使わない。
+- `--concurrency=10` は、1つのインスタンスが同時に処理するリクエストの数。アップロードは1件で最大 11MB をメモリ（Cloud Run では一時ファイルもメモリに置かれる）に持つので、512MiB に収まるように絞っている。`--timeout=120` は、1リクエストの打ち切り時間（秒）。遅い回線からの写真の送信と、アメダスの取得（最大9回、1秒間隔）が収まる長さ。
 - `--min-instances=0` で、使っていないときはインスタンスが0になる（費用がかからない。最初のリクエストだけ数秒遅くなる）。`--max-instances=2` は、想定外のアクセスで費用が膨らまないようにするための上限。
 - ビルドが権限のエラーで失敗したときは、エラーに出るサービスアカウント（Cloud Build が使うもの）に、エラーが求めるロールを付ける。プロジェクトの作成時期によって、必要な設定が違う（要確認）。
 
