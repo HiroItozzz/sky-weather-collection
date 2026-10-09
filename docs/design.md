@@ -275,10 +275,12 @@ M1 では、7節の API のうち天気データの取得以外を、ローカ�
 - そうでなければ、Open-Meteo の15分値（`jma_seamless`）を使う。対象の時間帯の降水量の合計が 0.1mm 以上なら `rain`、それ未満なら `no_rain`。
 - `label` のジョブが完了していない、または両方とも値がそろわないときは `unknown`。
 - どの方法で判定したか（`amedas` / `open_meteo` / null）も返す。
+- 10分値・15分値は「その時刻までの合計」なので、実際に見ている範囲は最大で 14 分ほど前にずれる（例：t=03:09 なら 03:00〜04:00）。ゲーム用の定義としては、このずれを許す。
+- `label` のジョブが終わっても判定できなかった（`unknown` のまま）ことを区別できるよう、`answer` に `pending`（ジョブがまだ終わっていなければ true）を付ける。
 
 ### 13.3 撮影時の天気
 
-- `forecast` のジョブで取った Open-Meteo の値（`jma_seamless`）から、撮影時刻を含む1時間の値を取り出す：`weather_code`、`temperature_2m`、`precipitation`、`cloud_cover`。
+- `forecast` のジョブで取った Open-Meteo の1時間値（`jma_seamless`）から取り出す。`precipitation` は「その時刻までの1時間の合計」なので、撮影時刻を含む1時間（撮影時刻を切り上げた時刻の行）から取る。`weather_code`、`temperature_2m`、`cloud_cover` はその時刻の値なので、撮影時刻に最も近い時刻の行から取る。
 - `weather_code` は、次の3つに分類した `category` も返す：`clear`（0〜2）、`cloudy`（3、45、48）、`rain`（51 以上）。どれにも当てはまらないときは `weather_at_capture` 全体を null にする。
 - `forecast` のジョブが完了していなければ null。
 
@@ -301,7 +303,7 @@ M1 では、7節の API のうち天気データの取得以外を、ローカ�
     "captured_at": "...",
     "user_guess": "rain",
     "weather_at_capture": {"category": "cloudy", "weather_code": 3, "temperature_c": 18.2, "precipitation_mm": 0.0, "cloud_cover_pct": 90} ,
-    "answer": {"result": "rain", "source": "amedas"},
+    "answer": {"result": "rain", "source": "amedas", "pending": false},
     "correct": true
   }
   ```
