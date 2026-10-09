@@ -2,7 +2,23 @@
 
 空の写真とメタデータを集めるアプリ。Expo（React Native、TypeScript）、Expo SDK 57。
 
-いま（M2）は、端末の向き（方位角・仰角・ロール）と位置を表示して、正しく取れているかを実機で確かめるための画面だけがある。仕様と、実機で確かめる項目は [`docs/m2-app-sensors.md`](../docs/m2-app-sensors.md) を参照。
+いま（M3）は、空の写真を撮って、向き・位置・EXIF などのメタデータと一緒に端末内に保存し、サーバー（`server/`）へ送る。送れないときは端末内に溜めておき、電波が戻ったときやアプリを開いたときに送り直す。
+
+- 向きと位置の計算：[`docs/m2-app-sensors.md`](../docs/m2-app-sensors.md)
+- 撮影・保存・送信：[`docs/m3-app-capture.md`](../docs/m3-app-capture.md)（8節に実機で確かめる手順）
+
+## サーバーにつなぐ
+
+1. PC でサーバーを起動し、撮影者を作る（`server/README.md` を参照）。端末から届くように `--host 0.0.0.0` を付ける。
+
+   ```bash
+   cd server
+   uv run python -m sky_server.admin create-user --name <名前>   # 招待コードが1回だけ表示される
+   uv run uvicorn sky_server.main:create_app --factory --host 0.0.0.0 --port 8000
+   ```
+
+2. アプリの右上のボタンから設定の画面を開き、サーバーの URL（`http://<PC の LAN の IP>:8000`）と招待コードを入れて「保存」、「接続を確かめる」。
+3. 空に向けて（仰角 20° 以上）シャッターを押す。
 
 ## 必要なもの
 
@@ -40,7 +56,8 @@ npx expo start
 ## 開発用のコマンド
 
 ```bash
-npm test              # jest（向きの計算などのテスト）
+npm test              # jest（向きの計算、メタデータ、再送キューなどのテスト）
+npm run test:e2e      # 動いているサーバーに対するテスト（SKY_E2E_URL と SKY_E2E_TOKEN が必要。docs/m3-app-capture.md の 8.1）
 npx tsc --noEmit      # 型チェック
 npx expo-doctor       # 依存パッケージと設定の診断
 npx expo install <パッケージ>   # パッケージの追加（SDK に合う版が選ばれるので npm install ではなくこちらを使う）
@@ -49,11 +66,19 @@ npx expo install <パッケージ>   # パッケージの追加（SDK に合う�
 ## 構成
 
 ```
-App.tsx               画面（カメラのプレビューと数値の表示、「記録」ボタン）
+App.tsx               撮影の画面と設定の画面の切り替え
+src/screens/          撮影の画面、設定・送信状況の画面
 src/useSensors.ts     センサーと位置の購読
+src/exif.ts           EXIF から camera の項目を作る
+src/metadata.ts       サーバーに送るメタデータ（設計メモ4節）を作る
+src/observationStore.ts  端末内への保存（画像、metadata.json、status.json）
+src/transport.ts      サーバーへの PUT と、応答の分類
+src/uploadQueue.ts    再送キュー（送る順番、待ち時間、止めどころ）
+src/useUploadQueue.ts 再送のきっかけ（起動、前面、電波、30秒ごと）
+src/settings.ts       サーバーの URL と招待コード（expo-secure-store）
 src/orientation.ts    回転行列からカメラの方位角・仰角・ロールを計算する
 src/declination.ts    WMM2025 による偏角と全磁力
-src/record.ts         「記録」の JSON（設計メモ4節の orientation / location の形）を作る
+src/record.ts         向きと位置を、設計メモ4節の orientation / location の形にする
 ```
 
 ## メモ

@@ -30,7 +30,8 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "test": "jest"
+    "test": "jest",
+    "test:e2e": "jest src/e2e.test.ts"
   },
   "private": true,
   "jest": {

@@ -189,7 +189,7 @@ type Outcome = { kind: "ok" } | { kind: "auth" } | { kind: "rejected"; error: st
 
 ### 8.1 自動のテスト（`app/src/e2e.test.ts`）
 
-環境変数 `SKY_E2E_URL` と `SKY_E2E_TOKEN` があるときだけ動く（ないときは skip）。`npm run test:e2e` で流す。jest の `node` 環境で、本物の `transport.ts` と、メモリの上の偽の保存先（画像は `Blob`）を使う。
+環境変数 `SKY_E2E_URL` と `SKY_E2E_TOKEN` があるときだけ動く（ないときは skip）。`npm run test:e2e` で流す。jest の `node` 環境で、本物の `transport.ts` と、メモリの上の偽の保存先（画像は `Blob`）を使う。`jest-expo` のプリセットはグローバルの `fetch` を Expo の実装に差し替える（`node` 環境でも差し替わり、応答の `status` が取れない）ので、テストの中に `node:http` で書いた最小の `fetch` を置き、`createFetchTransport` に渡す。`FormData` と `Blob` は Node のものを使う。
 
 1. 小さな JPEG（テストの中にバイト列で持つ）と `buildMetadata` で作ったメタデータを1件入れて送る → `sent`、サーバーの `GET` で `received_at` が返る。
 2. 同じものを `pending` に戻してもう一度送る → 200 で `sent`（再送）。
