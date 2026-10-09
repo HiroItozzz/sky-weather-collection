@@ -11,23 +11,16 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from sky_server.auth import hash_token
-from sky_server.config import get_data_dir
+from sky_server.backends import build_backend
 from sky_server.jobs import (
     JobRepository,
     JobRunner,
-    LocalJobRepository,
-    LocalTaskScheduler,
     TaskScheduler,
     default_fetchers,
     ensure_weather_jobs,
 )
 from sky_server.models import UUID_PATTERN, ObservationMetadata, User
-from sky_server.storage import (
-    BlobStore,
-    LocalBlobStore,
-    LocalObservationRepository,
-    ObservationRepository,
-)
+from sky_server.storage import BlobStore, ObservationRepository
 from sky_server.task_auth import TaskAuthenticator, get_task_authenticator
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -50,15 +43,16 @@ def create_app(
     runner: JobRunner | None = None,
     task_auth: TaskAuthenticator | None = None,
 ) -> FastAPI:
-    if data_dir is None:
-        data_dir = get_data_dir()
-    repository = repository or LocalObservationRepository(data_dir)
-    blob_store = blob_store or LocalBlobStore(data_dir)
-    job_repository = job_repository or LocalJobRepository(data_dir)
-    scheduler = scheduler or LocalTaskScheduler(data_dir)
-    if runner is None:
-        weather_store = LocalBlobStore(data_dir, "weather")
-        runner = JobRunner(repository, job_repository, scheduler, default_fetchers(weather_store))
+    # 引数で渡されなかったものは、設定（SKY_BACKEND）に合わせて作る。全部渡されたら作らない
+    if None in (repository, blob_store, job_repository, scheduler) or runner is None:
+        backend = build_backend(data_dir)
+        repository = repository or backend.repository
+        blob_store = blob_store or backend.blob_store
+        job_repository = job_repository or backend.job_repository
+        scheduler = scheduler or backend.scheduler
+        if runner is None:
+            fetchers = default_fetchers(backend.weather_store)
+            runner = JobRunner(repository, job_repository, scheduler, fetchers)
     # SKY_TASK_AUTH の値が正しくなければ、ここで起動時にエラーになる
     task_auth = task_auth or get_task_authenticator()
 
@@ -102,8 +96,10 @@ def create_app(
     def healthz() -> dict:
         return {"status": "ok"}
 
+    # 保存先（Firestore、Cloud Tasks など）は同期のクライアントなので、async にせず
+    # スレッドプールで動かして、イベントループを止めないようにする
     @app.put("/v1/observations/{observation_id}")
-    async def put_observation(
+    def put_observation(
         observation_id: ObservationId,
         user: CurrentUser,
         metadata: Annotated[str, Form()],
@@ -113,7 +109,7 @@ def create_app(
 
         if image.content_type != "image/jpeg":
             raise HTTPException(422, "image は image/jpeg で送ってください")
-        data = await image.read(MAX_IMAGE_BYTES + 1)
+        data = image.file.read(MAX_IMAGE_BYTES + 1)
         if len(data) > MAX_IMAGE_BYTES:
             raise HTTPException(413, "画像が大きすぎます（上限は10MBです）")
 

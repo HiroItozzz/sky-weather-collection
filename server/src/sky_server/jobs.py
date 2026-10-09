@@ -26,6 +26,8 @@ PHASE_PROVIDERS = {
 # Open-Meteo の過去の値は最新のモデル実行から来るので、待つほど実況に近くなる
 LABEL_RANGE_END = timedelta(hours=3)
 LABEL_WAIT = timedelta(hours=3)
+# Cloud Tasks とサーバーの時計のずれで、予約より少し早く届いても実行する
+DUE_MARGIN = timedelta(minutes=2)
 MAX_ATTEMPTS = 6
 BASE_WAIT = timedelta(minutes=5)
 MAX_WAIT = timedelta(hours=2)
@@ -240,7 +242,7 @@ class JobRunner:
             return "ignored", "job_not_found"
         if job.status != "pending":
             return "ignored", "already_finished"
-        if now < job.next_attempt_at:
+        if now < job.next_attempt_at - DUE_MARGIN:
             if not job.enqueued:
                 _enqueue(job, self._jobs, self._scheduler)
             return "ignored", "not_due"
