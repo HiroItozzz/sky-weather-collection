@@ -8,7 +8,7 @@ import json
 import math
 from datetime import UTC, datetime, timedelta, timezone
 
-from sky_server.weather.common import ceil_hour, floor_to_minutes
+from sky_server.weather.common import ceil_hour, floor_hour, floor_to_minutes
 
 JST = timezone(timedelta(hours=9))
 TIME_FORMAT = "%Y-%m-%dT%H:%M"
@@ -82,9 +82,13 @@ def _series(body: dict, group: str, name: str) -> tuple[list, list] | None:
 
 
 def weather_at_capture(open_meteo_envelope: dict | None, captured_at: datetime) -> dict | None:
-    """撮影時刻を含む1時間 (T-1h, T] の天気を返す。T は撮影時刻を切り上げた時刻。
+    """撮影時の天気を返す。変数によって、使う行が違う。
 
-    `weather_code` が取れないか `category` が決まらないときは None。
+    - `precipitation`：撮影時刻を含む1時間 (T-1h, T] の行。T は撮影時刻を切り上げた時刻。
+    - `weather_code`、`temperature_2m`、`cloud_cover`：撮影時刻に最も近い時刻の行。
+      時に丸め、ちょうど30分は切り上げる。
+
+    最も近い行がないか、`weather_code` が取れないか `category` が決まらないときは None。
     ほかの値は、取れなければその項目だけ None にする。
     """
     body = _open_meteo_body(open_meteo_envelope)
@@ -93,19 +97,22 @@ def weather_at_capture(open_meteo_envelope: dict | None, captured_at: datetime) 
     hourly = body.get("hourly")
     if not isinstance(hourly, dict) or not isinstance(hourly.get("time"), list):
         return None
-    key = ceil_hour(_as_utc(captured_at)).strftime(TIME_FORMAT)
-    try:
-        index = hourly["time"].index(key)
-    except ValueError:
-        return None
+    t = _as_utc(captured_at)
+    # 30分を足して切り捨てると、ちょうど30分は切り上がり、29分59秒は切り下がる
+    nearest = floor_hour(t + timedelta(minutes=30))
+    ceiling = ceil_hour(t)
 
-    def pick(name: str) -> object:
+    def pick(name: str, when: datetime) -> object:
+        try:
+            index = hourly["time"].index(when.strftime(TIME_FORMAT))
+        except ValueError:
+            return None
         values = hourly.get(name + MODEL_SUFFIX)
         if not isinstance(values, list) or index >= len(values):
             return None
         return values[index]
 
-    code = pick("weather_code")
+    code = pick("weather_code", nearest)
     if _is_number(code) and float(code).is_integer():
         code = int(code)
     else:
@@ -114,16 +121,16 @@ def weather_at_capture(open_meteo_envelope: dict | None, captured_at: datetime) 
     if result_category is None:
         return None
 
-    def number_or_none(name: str) -> float | int | None:
-        value = pick(name)
+    def number_or_none(name: str, when: datetime) -> float | int | None:
+        value = pick(name, when)
         return value if _is_number(value) else None
 
     return {
         "category": result_category,
         "weather_code": code,
-        "temperature_c": number_or_none("temperature_2m"),
-        "precipitation_mm": number_or_none("precipitation"),
-        "cloud_cover_pct": number_or_none("cloud_cover"),
+        "temperature_c": number_or_none("temperature_2m", nearest),
+        "precipitation_mm": number_or_none("precipitation", ceiling),
+        "cloud_cover_pct": number_or_none("cloud_cover", nearest),
     }
 
 

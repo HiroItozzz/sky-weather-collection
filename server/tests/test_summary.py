@@ -121,6 +121,8 @@ HOURLY = hourly_body(
         ("2026-10-09T04:00", 61, 19.0, 1.2, 90),
     ]
 )
+# 上の HOURLY では、03:00 の行は「晴れで降水量 0.0」、04:00 の行は「雨で降水量 1.2」と分かれている。
+# 03:00 の少し後に撮ると、天気は 03:00 の行、降水量は 04:00 の行から取られる。
 
 
 # ---- category ----
@@ -165,9 +167,26 @@ def test_撮影時刻がちょうど時のときはその時刻の行を使う()
     }
 
 
-def test_撮影時刻がちょうど時でないときは切り上げた時刻の行を使う():
-    # 03:00 を1分過ぎただけでも、撮影時刻を含む1時間 (03:00, 04:00] の行（04:00）になる
-    result = weather_at_capture(open_meteo_envelope(hourly=HOURLY), at(3, 1))
+def test_撮影時刻が時の少し前のときは降水量だけ切り上げた行を使う():
+    # 03:29:59 に最も近い時刻は 03:00（天気・気温・雲量）。
+    # 降水量は、含む1時間 (03:00, 04:00] の 04:00 の行
+    result = weather_at_capture(
+        open_meteo_envelope(hourly=HOURLY), datetime(2026, 10, 9, 3, 29, 59, tzinfo=UTC)
+    )
+    assert result == {
+        "category": "clear",
+        "weather_code": 1,
+        "temperature_c": 21.5,
+        "precipitation_mm": 1.2,
+        "cloud_cover_pct": 20,
+    }
+    # 03:01 でも同じ行の組み合わせになる
+    assert weather_at_capture(open_meteo_envelope(hourly=HOURLY), at(3, 1)) == result
+
+
+def test_撮影時刻がちょうど30分のときは切り上げた行を使う():
+    # 03:30 に最も近い時刻は、ちょうど30分なので切り上げて 04:00
+    result = weather_at_capture(open_meteo_envelope(hourly=HOURLY), at(3, 30))
     assert result == {
         "category": "rain",
         "weather_code": 61,
@@ -175,32 +194,80 @@ def test_撮影時刻がちょうど時でないときは切り上げた時刻�
         "precipitation_mm": 1.2,
         "cloud_cover_pct": 90,
     }
+
+
+def test_撮影時刻が30分を過ぎたときは切り上げた行を使う():
+    result = weather_at_capture(open_meteo_envelope(hourly=HOURLY), at(3, 31))
+    assert result["weather_code"] == 61
+    assert result["precipitation_mm"] == 1.2
     assert weather_at_capture(open_meteo_envelope(hourly=HOURLY), at(3, 59))["weather_code"] == 61
 
 
+def test_降水量と天気は別の行から取る():
+    # 02:00 の降水量は 0.3 で、03:00 の降水量は 0.0。03:00 ちょうどの降水量は 03:00 の行
+    hourly = hourly_body(
+        [
+            ("2026-10-09T02:00", 0, 20.0, 0.3, 10),
+            ("2026-10-09T03:00", 3, 21.5, 0.0, 20),
+            ("2026-10-09T04:00", 61, 19.0, 1.2, 90),
+        ]
+    )
+    envelope = open_meteo_envelope(hourly=hourly)
+    # 02:10 は、天気は 02:00 の行、降水量は 03:00 の行
+    result = weather_at_capture(envelope, at(2, 10))
+    assert (result["weather_code"], result["precipitation_mm"]) == (0, 0.0)
+    # 02:40 は、天気は 03:00 の行、降水量も 03:00 の行
+    result = weather_at_capture(envelope, at(2, 40))
+    assert (result["weather_code"], result["precipitation_mm"]) == (3, 0.0)
+    # 03:10 は、天気は 03:00 の行、降水量は 04:00 の行
+    result = weather_at_capture(envelope, at(3, 10))
+    assert (result["weather_code"], result["precipitation_mm"]) == (3, 1.2)
+
+
+def test_最も近い行はあるが降水量の行がないときは降水量だけnullになる():
+    # 04:10 の最も近い行は 04:00 だが、降水量の行（05:00）はない
+    result = weather_at_capture(open_meteo_envelope(hourly=HOURLY), at(4, 10))
+    assert result["weather_code"] == 61
+    assert result["precipitation_mm"] is None
+
+
+def test_最も近い行がないときは全体がnullになる():
+    # 02:00 の行はあるが、01:40 に最も近いのは 02:00 なのでここは取れる
+    assert weather_at_capture(open_meteo_envelope(hourly=HOURLY), at(1, 40))["weather_code"] == 0
+    # 01:29 に最も近いのは 01:00 で、その行はない
+    assert weather_at_capture(open_meteo_envelope(hourly=HOURLY), at(1, 29)) is None
+    # 降水量の行（04:00）があっても、最も近い行（05:00）がなければ全体が null
+    assert weather_at_capture(open_meteo_envelope(hourly=HOURLY), at(4, 30)) is None
+
+
 def test_秒がある撮影時刻もちょうど時とはみなさない():
+    # 03:00:01 の降水量は (03:00, 04:00] の行、天気は 03:00 の行
     result = weather_at_capture(
         open_meteo_envelope(hourly=HOURLY), datetime(2026, 10, 9, 3, 0, 1, tzinfo=UTC)
     )
-    assert result["weather_code"] == 61
+    assert result["weather_code"] == 1
+    assert result["precipitation_mm"] == 1.2
 
 
 def test_JSTの時刻もUTCに直して行を選ぶ():
-    # 12:30 JST は 03:30 UTC なので、04:00 の行になる
+    # 12:30 JST は 03:30 UTC なので、天気も降水量も 04:00 の行になる
     captured_at = datetime(2026, 10, 9, 12, 30, tzinfo=JST)
-    assert weather_at_capture(open_meteo_envelope(hourly=HOURLY), captured_at)["weather_code"] == 61
+    result = weather_at_capture(open_meteo_envelope(hourly=HOURLY), captured_at)
+    assert result["weather_code"] == 61
+    assert result["precipitation_mm"] == 1.2
 
 
 def test_日付をまたぐ時刻でも正しい行を選ぶ():
     hourly = hourly_body(
         [
             ("2026-10-09T23:00", 0, 18.0, 0.0, 0),
-            ("2026-10-10T00:00", 3, 17.0, 0.0, 100),
+            ("2026-10-10T00:00", 3, 17.0, 2.0, 100),
         ]
     )
     envelope = open_meteo_envelope(hourly=hourly)
     # 23:30 UTC は翌日 00:00 の行
-    assert weather_at_capture(envelope, at(23, 30))["weather_code"] == 3
+    result = weather_at_capture(envelope, at(23, 30))
+    assert (result["weather_code"], result["precipitation_mm"]) == (3, 2.0)
     # 同じ時刻を JST で書いたもの（2026-10-10 08:30 +09:00）でも同じ
     assert (
         weather_at_capture(envelope, datetime(2026, 10, 10, 8, 30, tzinfo=JST))["weather_code"] == 3
