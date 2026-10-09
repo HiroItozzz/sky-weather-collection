@@ -297,10 +297,72 @@ server/src/sky_server/
 
 ## 10. GCP 版（PR-B）
 
-PR-B で詳しく書く。方針だけ先に決めておく。
+構成は design.md の 3節のとおり。リージョンは `us-central1` に統一する（Cloud Storage の常時無料枠が米国の一部リージョンだけのため）。デプロイの手順は `docs/deploy-gcp.md` にある。
 
-- `FirestoreObservationRepository`、`FirestoreJobRepository`（コレクション `users`、`observations`、`weather_jobs`。`add_*` は `create()` で、すでにあれば False）。
-- `GcsBlobStore(bucket, prefix)`：画像と天気データは同じバケットの別の接頭辞（`images/`、`weather/`）にする。
-- `CloudTasksScheduler`：キューにタスクを作り、`schedule_time` に `POST /internal/tasks/fetch-weather` を OIDC トークンつきで呼ばせる。タスク名は `{job_id}-{attempts}` にして、同じ予約を二重に作らない。
-- `SKY_TASK_AUTH=oidc`：`Authorization` の ID トークンを検証する（発行者が Google、`aud` が設定した URL、`email` が設定したサービスアカウント）。
-- Dockerfile とデプロイ手順書（`docs/deploy-gcp.md`）。デプロイはユーザーが gcloud で行う。
+### 10.1 どちらの版を使うか
+
+- 設定 `SKY_BACKEND`：`local`（既定）か `gcp`。それ以外は起動時にエラー。
+- `sky_server/backends.py` の `build_backend(data_dir)` が、設定から次の5つをまとめて作る：`repository`（観測と撮影者）、`blob_store`（画像）、`weather_store`（天気データ）、`job_repository`、`scheduler`。`create_app` と管理コマンドはこれを使う（引数で渡されたものが優先）。
+- GCP 用のモジュール（`google.cloud.*`）は `gcp` のときだけ読み込む（ローカルでの起動とテストを軽くするため）。
+- `gcp` のときの設定
+
+| 名前 | 既定 | 内容 |
+|---|---|---|
+| `SKY_GCP_PROJECT` | （必須） | プロジェクト ID |
+| `SKY_GCS_BUCKET` | （必須） | 画像と天気データを置くバケット |
+| `SKY_TASKS_LOCATION` | `us-central1` | Cloud Tasks のキューのリージョン |
+| `SKY_TASKS_QUEUE` | `weather-fetch` | キューの名前 |
+| `SKY_TASKS_TARGET_URL` | （必須） | `https://<Cloud Run の URL>/internal/tasks/fetch-weather` |
+| `SKY_TASKS_SERVICE_ACCOUNT` | （必須） | Cloud Tasks が OIDC トークンを発行するときのサービスアカウントのメール |
+
+必須の値がなければ、起動時にどの名前が足りないかを示してエラーにする。
+
+### 10.2 Firestore
+
+- データベースは `(default)`、ネイティブモード。
+- コレクション：`users`（ドキュメント ID は `user_id`）、`observations`（`observation_id`）、`weather_jobs`（`job_id`）。中身はローカル版の JSON と同じ形（`model_dump(mode="json")` や観測の dict をそのまま）。
+- `add_observation` / `add_job` は `document(id).create(data)` で作り、`AlreadyExists`（`google.api_core.exceptions`）なら False。
+- `get_user_by_token_hash` は `where(filter=FieldFilter("token_hash", "==", h)).limit(1)` で探す（単一項目のインデックスは自動で作られる）。
+- `update_*` は `document(id).set(data)`。
+- 実行の重複（3.3節）はローカル版と同じく許容する。トランザクションは使わない。
+
+### 10.3 Cloud Storage
+
+- `GcsBlobStore(bucket, prefix)`。画像は接頭辞 `images/`、天気データは `weather/`（キーの前に付ける）。
+- `put` は `blob.upload_from_string(data)`、`get` は `blob.download_as_bytes()` で、`NotFound` なら None。
+- バケットは公開アクセスを禁止し、均一なバケットレベルのアクセスにする（手順書）。
+
+### 10.4 Cloud Tasks
+
+- `CloudTasksScheduler.schedule(job_id, run_at)` は、キューに次のタスクを作る。
+  - `name`：`{queue のパス}/tasks/{job_id}-{run_at の UNIX 秒}`。同じ予約を二重に作らないため。`AlreadyExists` なら予約済みとみなして成功にする。
+  - `schedule_time`：`run_at`。
+  - `http_request`：`POST SKY_TASKS_TARGET_URL`、本文 `{"job_id": ...}`、`Content-Type: application/json`、`oidc_token`（`service_account_email` は `SKY_TASKS_SERVICE_ACCOUNT`、`audience` は `SKY_TASKS_TARGET_URL`）。
+- キューの再試行の設定（手順書で作る）：アプリが 500 を返したときだけ使われる。最大5回、最小の間隔 60 秒。同時に送る数は1、1秒あたり1件まで（アメダスへの負荷を抑えるため）。
+- `run-due-jobs` は `gcp` では使わない（Cloud Tasks が呼ぶため）。`SKY_BACKEND=gcp` で実行したらエラーで終わる。
+
+### 10.5 予定より少し早く届いたとき
+
+Cloud Tasks の時計とサーバーの時計は少しずれることがある。予約した時刻よりわずかに早く届くと、3.3節の手順 3 で `not_due` として捨てられ、`enqueued` が true のままなので、そのジョブは二度と実行されなくなる。これを防ぐため、手順 3 は `now < next_attempt_at - 2分` のときだけ `not_due` にする（ローカル版でも同じ）。
+
+### 10.6 OIDC の検証（`SKY_TASK_AUTH=oidc`）
+
+- `Authorization: Bearer <ID トークン>` を `google.oauth2.id_token.verify_oauth2_token(token, Request(), audience=SKY_TASKS_TARGET_URL)` で検証する（署名、有効期限、発行者が Google であることを確かめる）。
+- 加えて、`email` が `SKY_TASKS_SERVICE_ACCOUNT` と一致し、`email_verified` が true であることを確かめる。
+- どれかが満たされなければ 401。理由はログにだけ出し、応答には出さない。
+- 検証に使う関数は差し替えられるようにする（テストでは偽物を使う）。
+
+### 10.7 撮影者の作成
+
+`SKY_BACKEND=gcp` と 10.1節の設定を付けて、手元の PC から `admin create-user` を実行する（`gcloud auth application-default login` の認証情報で Firestore に書く）。
+
+### 10.8 テスト
+
+実際の GCP には接続しない。Firestore、Cloud Storage、Cloud Tasks のクライアントは、使う範囲だけを真似たメモリ上の偽物をテストに置き、それを差し込んで確かめる。Firestore のエミュレーターは Java と gcloud のコンポーネントが要るので使わない。
+
+- Firestore 版：M1 と M4 のリポジトリの振る舞い（作成、同じ ID なら False、取得、更新、トークンのハッシュでの検索）。
+- GCS 版：接頭辞が付くこと、ないキーは None。
+- Cloud Tasks 版：作るタスクの中身（名前、時刻、URL、本文、OIDC）、`AlreadyExists` を成功とみなすこと。
+- OIDC：正しいトークンは通る。`audience` やメールの違い、`email_verified` が false、ヘッダーなし、検証関数の例外はすべて 401。
+- `build_backend` と設定：不正な `SKY_BACKEND`、必須の値が足りないときのエラー。
+- 10.5節：予約の2分前までは実行し、それより前なら `not_due`。
