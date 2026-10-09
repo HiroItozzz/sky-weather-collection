@@ -7,6 +7,8 @@ import { createHash, randomUUID } from "node:crypto";
 import http from "node:http";
 import { beforeAll, describe, expect, it } from "@jest/globals";
 import { buildMetadata } from "./metadata";
+import type { Mat3 } from "./orientation";
+import type { Sample } from "./record";
 import { createFetchTransport } from "./transport";
 import { createUploadQueue, type QueueItem, type Status, type Store } from "./uploadQueue";
 
@@ -64,11 +66,21 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+/**
+ * 縦持ち・カメラ南を向き 45° 見上げる姿勢の R（orientation.test.ts と同じ）を、
+ * 押した時刻の前後 0.5 秒に数個。
+ */
+function knownSamples(pressedAtMs: number): Sample[] {
+  const s = Math.SQRT1_2;
+  const R: Mat3 = [-1, 0, 0, 0, s, s, 0, s, -s];
+  return [-400, -200, 0, 200, 400].map((dt) => ({ t: pressedAtMs + dt, R }));
+}
+
 function makeMetadataJson(id: string, bytes: Uint8Array, pressedAtMs: number): string {
   const metadata = buildMetadata({
     observationId: id,
     pressedAtMs,
-    samples: [],
+    samples: knownSamples(pressedAtMs),
     location: {
       coords: {
         latitude: 35.6812,
@@ -80,7 +92,16 @@ function makeMetadataJson(id: string, bytes: Uint8Array, pressedAtMs: number): s
       timestamp: pressedAtMs - 1000,
     },
     headingAccuracy: 3,
-    exif: { ExposureTime: 0.01, ISOSpeedRatings: 100, FNumber: 1.8, FocalLength: 4.2 },
+    exif: {
+      FocalLength: 4.2,
+      FocalLengthIn35mmFilm: 26,
+      ExposureTime: 0.01,
+      ISOSpeedRatings: 100,
+      FNumber: 1.8,
+      WhiteBalance: 0,
+      ImageWidth: 8,
+      ImageLength: 8,
+    },
     width: 8,
     height: 8,
     device: { platform: "android", os_version: "14", model: "e2e", app_version: "0.0.0" },
@@ -185,6 +206,31 @@ describeE2e("サーバーとつないだ送信", () => {
     expect(typeof body.received_at).toBe("string");
   });
 
+  it("1b. 向き・位置・カメラの全項目が null でないメタデータが受け付けられる（201）", async () => {
+    const id = randomUUID();
+    const pressedAtMs = fixedNow - 5000;
+    const metadata = JSON.parse(makeMetadataJson(id, JPEG, pressedAtMs)) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    for (const key of ["orientation", "location", "camera"]) {
+      expect(metadata[key]).not.toBeNull();
+      for (const [name, value] of Object.entries(metadata[key])) {
+        expect([key, name, value === null]).toEqual([key, name, false]);
+      }
+    }
+
+    const response = await createFetchTransport(nodeFetch).put(
+      SERVER_URL,
+      TOKEN,
+      id,
+      JSON.stringify(metadata),
+      new Blob([new Uint8Array(JPEG)], { type: "image/jpeg" }),
+      JPEG.length,
+    );
+    expect(response).toEqual({ kind: "ok" });
+  });
+
   it("2. 同じものを pending に戻して送り直しても sent になる", async () => {
     memory.resetToPending(firstId);
     await queue.runNow();
@@ -215,12 +261,12 @@ describeE2e("サーバーとつないだ送信", () => {
     await queue.runNow();
     expect(memory.get(id).status.state).toBe("pending");
     expect(memory.get(id).status.attempts).toBe(0);
-    expect(queue.getState().authBlocked).toBe(true);
+    expect(queue.getState().blockedReason).toBe("auth");
 
     // 招待コードを直せば再開して送られる
     settings.inviteCode = TOKEN;
-    await queue.resumeAfterAuthFix();
-    expect(queue.getState().authBlocked).toBe(false);
+    await queue.resumeAfterSettingsSaved();
+    expect(queue.getState().blockedReason).toBeNull();
     expect(memory.get(id).status.state).toBe("sent");
   });
 

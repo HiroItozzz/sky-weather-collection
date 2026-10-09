@@ -6,10 +6,13 @@ export type Settings = { serverUrl: string; inviteCode: string };
 const KEY_SERVER_URL = "serverUrl";
 const KEY_INVITE_CODE = "inviteCode";
 
-/** 前後の空白と末尾の `/` を取る。`http://` か `https://` で始まらなければ null。 */
+/**
+ * 前後の空白と末尾の `/` を取る。`http://` か `https://` で始まらなければ null。
+ * ホストの後ろにパス・`?`・`#` があっても null（`/v1/v1/...` のような URL になるのを防ぐ）。
+ */
 export function normalizeServerUrl(input: string): string | null {
   const trimmed = input.trim().replace(/\/+$/, "");
-  if (!/^https?:\/\/./i.test(trimmed)) return null;
+  if (!/^https?:\/\/[^/?#]+$/i.test(trimmed)) return null;
   return trimmed;
 }
 

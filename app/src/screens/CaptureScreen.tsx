@@ -6,6 +6,7 @@ import Constants from "expo-constants";
 import { randomUUID } from "expo-crypto";
 import * as Device from "expo-device";
 import { toTrueAzimuth } from "../orientation";
+import type { Sample } from "../record";
 import { saveCapture } from "../observationStore";
 import { loadSettings, type Settings } from "../settings";
 import type { QueueState, UploadQueue } from "../uploadQueue";
@@ -50,6 +51,8 @@ export default function CaptureScreen({ queue, queueState, onOpenSettings }: Pro
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(false);
+  // 二度押しを同期的にはじくためのフラグ（状態の更新は待たない）
+  const shootingRef = useRef(false);
 
   // 設定の画面から戻ったときに読み直すため、この画面を開くたびに読む
   useEffect(() => {
@@ -95,22 +98,34 @@ export default function CaptureScreen({ queue, queueState, onOpenSettings }: Pro
 
   const onShutter = async () => {
     const camera = cameraRef.current;
-    if (camera === null || !canShoot) return;
+    if (shootingRef.current || camera === null || !canShoot) return;
+    shootingRef.current = true;
     const pressedAtMs = Date.now();
     setSaving(true);
     setMessage(null);
     try {
-      const picture = await camera.takePictureAsync({ skipProcessing: true, exif: true });
-      // 押した時刻の後ろ 0.5 秒のサンプルがそろうまで待つ
-      const wait = pressedAtMs + SAMPLE_WAIT_MS - Date.now();
-      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      // 押した時刻の後ろ 0.5 秒がたったところで、前後 0.5 秒のサンプルを複製しておく。
+      // 撮影に時間がかかっても、押した瞬間のサンプルが手元の記録から消えないようにするため。
+      const samplesPromise = new Promise<Sample[]>((resolve) => {
+        setTimeout(
+          () => resolve([...getSamplesAround(pressedAtMs)]),
+          Math.max(0, pressedAtMs + SAMPLE_WAIT_MS - Date.now()),
+        );
+      });
+      const picturePromise = camera.takePictureAsync({ skipProcessing: true, exif: true }).then(
+        (result) => ({ result, elapsedMs: Date.now() - pressedAtMs }),
+      );
+      const [{ result: picture, elapsedMs }, samples] = await Promise.all([
+        picturePromise,
+        samplesPromise,
+      ]);
 
       const { location, headingAccuracy } = getLatest();
       await saveCapture({
         observationId: randomUUID(),
         cachedUri: picture.uri,
         pressedAtMs,
-        samples: getSamplesAround(pressedAtMs),
+        samples,
         location,
         headingAccuracy,
         exif: picture.exif,
@@ -123,7 +138,7 @@ export default function CaptureScreen({ queue, queueState, onOpenSettings }: Pro
           app_version: Constants.expoConfig?.version ?? null,
         },
       });
-      setMessage("保存しました");
+      setMessage(`保存しました（撮影 ${elapsedMs} ms）`);
       // 保存の完了後に件数を数え直し、送信を始める
       warnOnFailure(queue.refresh().then(() => queue.runNow()), "撮影後の送信");
     } catch (e) {
@@ -131,6 +146,7 @@ export default function CaptureScreen({ queue, queueState, onOpenSettings }: Pro
       const reason = e instanceof Error ? e.message : String(e);
       setMessage(`保存に失敗しました（${reason}）`);
     } finally {
+      shootingRef.current = false;
       setSaving(false);
     }
   };
@@ -232,8 +248,13 @@ export default function CaptureScreen({ queue, queueState, onOpenSettings }: Pro
             サーバーが設定されていません。右上のボタンから設定してください。
           </Text>
         ) : null}
-        {queueState.authBlocked ? (
+        {queueState.blockedReason === "auth" ? (
           <Text style={styles.warn}>招待コードが違います。設定で確かめてください。</Text>
+        ) : null}
+        {queueState.blockedReason === "config" ? (
+          <Text style={styles.warn}>
+            サーバーに断られました。設定でサーバーの URL を確かめてください。
+          </Text>
         ) : null}
       </View>
 

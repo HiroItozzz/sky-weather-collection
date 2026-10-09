@@ -17,6 +17,8 @@ import type { QueueItem, QueueState, UploadQueue } from "../uploadQueue";
 import { warnOnFailure } from "../useUploadQueue";
 
 const CHECK_TIMEOUT_MS = 10_000;
+const URL_FORMAT_MESSAGE =
+  "サーバーの URL は、http://192.168.0.10:8000 のように、http:// か https:// で始めて、パスを付けずに入れてください。";
 
 type Props = {
   queue: UploadQueue;
@@ -99,7 +101,7 @@ export default function SettingsScreen({ queue, queueState, onBack }: Props) {
   const onSave = async () => {
     const normalized = normalizeServerUrl(serverUrl);
     if (normalized === null) {
-      setFormMessage("サーバーの URL は http:// か https:// で始めてください。");
+      setFormMessage(URL_FORMAT_MESSAGE);
       return;
     }
     const code = inviteCode.trim();
@@ -113,13 +115,13 @@ export default function SettingsScreen({ queue, queueState, onBack }: Props) {
     setServerUrl(normalized);
     setInviteCode(code);
     setFormMessage("保存しました。");
-    warnOnFailure(queue.resumeAfterAuthFix(), "設定の保存後の送信");
+    warnOnFailure(queue.resumeAfterSettingsSaved(), "設定の保存後の送信");
   };
 
   const onCheck = async () => {
     const normalized = normalizeServerUrl(serverUrl);
     if (normalized === null) {
-      setFormMessage("サーバーの URL は http:// か https:// で始めてください。");
+      setFormMessage(URL_FORMAT_MESSAGE);
       return;
     }
     setChecking(true);
@@ -183,9 +185,14 @@ export default function SettingsScreen({ queue, queueState, onBack }: Props) {
           </Pressable>
         </View>
         {formMessage !== null ? <Text style={styles.message}>{formMessage}</Text> : null}
-        {queueState.authBlocked ? (
+        {queueState.blockedReason === "auth" ? (
           <Text style={styles.warn}>
             招待コードが違うため、送信を止めています。確かめて保存し直してください。
+          </Text>
+        ) : null}
+        {queueState.blockedReason === "config" ? (
+          <Text style={styles.warn}>
+            サーバーに断られたため、送信を止めています。サーバーの URL を確かめて保存し直してください。
           </Text>
         ) : null}
 

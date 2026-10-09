@@ -24,6 +24,16 @@ function fileOf(id: string, name: string): File {
   return new File(observationDir(id), name);
 }
 
+/**
+ * 同じディレクトリの一時ファイル（*.tmp）に書いてから move で置き換える。
+ * 書いている途中で落ちても、中身が半分のファイルが残らないようにするため。
+ */
+async function writeAtomically(id: string, name: string, content: string): Promise<void> {
+  const tmp = fileOf(id, `${name}.tmp`);
+  tmp.write(content);
+  await tmp.move(fileOf(id, name), { overwrite: true });
+}
+
 /** metadata.json を読む。なければ、または読めなければ null。 */
 async function readMetadata(id: string): Promise<{ captured_at: string } | null> {
   const file = fileOf(id, METADATA_NAME);
@@ -35,7 +45,7 @@ async function readMetadata(id: string): Promise<{ captured_at: string } | null>
       if (typeof capturedAt === "string") return { captured_at: capturedAt };
     }
   } catch {
-    // 読めないものは、metadata.json がないものとして扱う
+    // 読めないものは、送信の対象から外す（消すかどうかは呼び出す側が存在で決める）
   }
   return null;
 }
@@ -92,7 +102,7 @@ export const observationStore: Store = {
   },
 
   async setStatus(id, status) {
-    fileOf(id, STATUS_NAME).write(JSON.stringify(status));
+    await writeAtomically(id, STATUS_NAME, JSON.stringify(status));
   },
 
   async deleteImage(id) {
@@ -144,7 +154,7 @@ export async function saveCapture(input: SaveCaptureInput): Promise<ObservationM
       device: input.device,
       imageSha256: toHex(digest),
     });
-    new File(dir, METADATA_NAME).write(JSON.stringify(metadata));
+    await writeAtomically(input.observationId, METADATA_NAME, JSON.stringify(metadata));
     return metadata;
   } catch (e) {
     try {
@@ -157,12 +167,14 @@ export async function saveCapture(input: SaveCaptureInput): Promise<ObservationM
 }
 
 /**
- * 起動時の掃除。metadata.json のない（または読めない）ディレクトリのうち、
+ * 起動時の掃除。metadata.json が存在しないディレクトリのうち、
  * 1 時間以上更新されていないものを消す。1 時間以内のものは保存の最中かもしれないので触らない。
+ * metadata.json が存在するのに読めないものは、画像を失わないように消さない。
+ * 残った *.tmp はそのままにする。
  */
 export async function cleanupIncomplete(nowMs: number = Date.now()): Promise<void> {
   for (const dir of listObservationDirs()) {
-    if ((await readMetadata(dir.name)) !== null) continue;
+    if (fileOf(dir.name, METADATA_NAME).exists) continue;
     const info = dir.info();
     // ファイルを足すと更新時刻が進むので、新しいほうを見る
     const times = [info.modificationTime, info.creationTime].filter(

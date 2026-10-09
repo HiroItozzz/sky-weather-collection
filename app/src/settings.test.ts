@@ -7,8 +7,13 @@ describe("normalizeServerUrl", () => {
     expect(normalizeServerUrl("https://example.com//")).toBe("https://example.com");
   });
 
-  it("パスは残す", () => {
-    expect(normalizeServerUrl("https://example.com/api/")).toBe("https://example.com/api");
+  it("ホストの後ろにパス、?、# があれば null", () => {
+    expect(normalizeServerUrl("https://example.com/api/")).toBeNull();
+    expect(normalizeServerUrl("http://192.168.0.5:8000/v1")).toBeNull();
+    expect(normalizeServerUrl("http://192.168.0.5:8000?x=1")).toBeNull();
+    expect(normalizeServerUrl("http://192.168.0.5:8000/?x=1")).toBeNull();
+    expect(normalizeServerUrl("http://192.168.0.5:8000#top")).toBeNull();
+    expect(normalizeServerUrl("http://192.168.0.5:8000/#top")).toBeNull();
   });
 
   it("http:// か https:// で始まらなければ null", () => {

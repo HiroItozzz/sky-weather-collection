@@ -30,8 +30,8 @@ export interface Store {
 export type QueueState = {
   /** 状態が pending のものの件数 */
   pendingCount: number;
-  /** 401 で止まっているか */
-  authBlocked: boolean;
+  /** キューを止めている理由。auth は 401、config は 403・404・405。止まっていなければ null */
+  blockedReason: "auth" | "config" | null;
   /** 送信の周が走っているか */
   running: boolean;
 };
@@ -52,8 +52,11 @@ export interface UploadQueue {
   runDue(): Promise<void>;
   /** rejected を pending に戻す（すぐには送らない）。 */
   retryRejected(id: string): Promise<void>;
-  /** 設定を保存し直したあとに、401 の停止を解いて送る。 */
-  resumeAfterAuthFix(): Promise<void>;
+  /**
+   * 設定を保存し直したあとに呼ぶ。設定の世代を1増やし、停止を解き、
+   * 古い版が 403・404・405 で rejected にしたものを pending に戻して送る。
+   */
+  resumeAfterSettingsSaved(): Promise<void>;
   /** 未送信の件数を数え直す。 */
   refresh(): Promise<void>;
   getState(): QueueState;
@@ -63,6 +66,8 @@ export interface UploadQueue {
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const BASE_DELAY_MS = 30_000;
 const MAX_DELAY_MS = 30 * 60_000;
+/** 古い版のアプリが rejected にしていた、設定の誤りによる応答 */
+const LEGACY_CONFIG_ERROR_PREFIXES = ["HTTP 403", "HTTP 404", "HTTP 405"];
 
 /** 一時的な失敗の待ち時間。attempts は失敗を数えたあとの回数（1 以上）。 */
 export function backoffMs(attempts: number): number {
@@ -80,14 +85,14 @@ function byCapturedAt(a: QueueItem, b: QueueItem): number {
 export function createUploadQueue(deps: UploadQueueDeps): UploadQueue {
   const { store, transport, getSettings, now } = deps;
 
-  let state: QueueState = { pendingCount: 0, authBlocked: false, running: false };
+  let state: QueueState = { pendingCount: 0, blockedReason: null, running: false };
   const listeners = new Set<(state: QueueState) => void>();
 
   function update(patch: Partial<QueueState>): void {
     const next = { ...state, ...patch };
     if (
       next.pendingCount === state.pendingCount &&
-      next.authBlocked === state.authBlocked &&
+      next.blockedReason === state.blockedReason &&
       next.running === state.running
     ) {
       return;
@@ -96,8 +101,12 @@ export function createUploadQueue(deps: UploadQueueDeps): UploadQueue {
     for (const listener of [...listeners]) listener(state);
   }
 
-  /** 1 周する。401 か通信のエラーが出たら、残りは送らずに打ち切る。 */
+  // 設定を保存し直すたびに1増える。古い設定で送った応答でキューを止め直さないために使う
+  let settingsGeneration = 0;
+
+  /** 1 周する。キューを止める応答か、通信の状態が悪いことを示す失敗が出たら、残りは送らずに打ち切る。 */
   async function pass(all: boolean): Promise<void> {
+    const startGeneration = settingsGeneration;
     const items = await store.list();
     let pendingCount = items.filter((i) => i.status.state === "pending").length;
     update({ pendingCount });
@@ -149,10 +158,11 @@ export function createUploadQueue(deps: UploadQueueDeps): UploadQueue {
           id,
           metadataJson,
           image.part,
+          image.size,
         );
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        outcome = { kind: "retry", error: `送信の準備に失敗しました: ${message}` };
+        outcome = { kind: "retry", error: `送信の準備に失敗しました: ${message}`, stopPass: false };
       }
 
       if (outcome.kind === "ok") {
@@ -166,8 +176,9 @@ export function createUploadQueue(deps: UploadQueueDeps): UploadQueue {
         pendingCount -= 1;
         update({ pendingCount });
         await store.deleteImage(id);
-      } else if (outcome.kind === "auth") {
-        update({ authBlocked: true });
+      } else if (outcome.kind === "blocked") {
+        // 送っている間に設定が保存し直されていたら、古い設定への応答なので止めずにこの周を終える
+        if (settingsGeneration === startGeneration) update({ blockedReason: outcome.reason });
         return;
       } else if (outcome.kind === "rejected") {
         await reject(outcome.error);
@@ -180,7 +191,7 @@ export function createUploadQueue(deps: UploadQueueDeps): UploadQueue {
           next_attempt_at: new Date(now() + backoffMs(attempts)).toISOString(),
           last_error: outcome.error,
         });
-        return;
+        if (outcome.stopPass) return;
       }
     }
   }
@@ -199,7 +210,7 @@ export function createUploadQueue(deps: UploadQueueDeps): UploadQueue {
     try {
       let all = firstAll;
       for (;;) {
-        if (!state.authBlocked) await pass(all);
+        if (state.blockedReason === null) await pass(all);
         if (rerun === null) break;
         all = rerun.all;
         rerun = null;
@@ -232,8 +243,19 @@ export function createUploadQueue(deps: UploadQueueDeps): UploadQueue {
       await refresh();
     },
 
-    async resumeAfterAuthFix() {
-      update({ authBlocked: false });
+    async resumeAfterSettingsSaved() {
+      settingsGeneration += 1;
+      update({ blockedReason: null });
+      const items = await store.list();
+      for (const item of items) {
+        const error = item.status.last_error ?? "";
+        if (
+          item.status.state === "rejected" &&
+          LEGACY_CONFIG_ERROR_PREFIXES.some((prefix) => error.startsWith(prefix))
+        ) {
+          await store.setStatus(item.id, { state: "pending", attempts: 0 });
+        }
+      }
       await request(true);
     },
 

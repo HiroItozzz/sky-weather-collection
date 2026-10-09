@@ -1,6 +1,6 @@
 // 再送キューを動かすきっかけ（起動、前面に戻ったとき、電波が戻ったとき、30 秒ごと）をつなぐフック。
 // 仕様は docs/m3-app-capture.md の 4.3 節。
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { addNetworkStateListener, getNetworkStateAsync } from "expo-network";
 import { cleanupIncomplete, observationStore } from "./observationStore";
@@ -19,16 +19,17 @@ export function warnOnFailure(task: Promise<unknown>, what: string): void {
 }
 
 export function useUploadQueue(): { queue: UploadQueue; state: QueueState } {
-  const queue = useMemo(
-    () =>
-      createUploadQueue({
-        store: observationStore,
-        transport: createFetchTransport(),
-        getSettings: loadSettings,
-        now: Date.now,
-      }),
-    [],
-  );
+  // 初回だけ作る（useMemo は作り直されることがあるため、useRef に持つ）
+  const queueRef = useRef<UploadQueue | null>(null);
+  if (queueRef.current === null) {
+    queueRef.current = createUploadQueue({
+      store: observationStore,
+      transport: createFetchTransport(),
+      getSettings: loadSettings,
+      now: Date.now,
+    });
+  }
+  const queue = queueRef.current;
   const [state, setState] = useState<QueueState>(queue.getState());
 
   useEffect(() => {
