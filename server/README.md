@@ -66,7 +66,7 @@ curl -i "http://localhost:8000/v1/observations/$ID" -H "Authorization: Bearer $T
 
 1. `PUT /v1/observations/{id}` が成功すると（新規の 201 も、再送の 200 も）、天気ジョブが2つできて予約される。
    - `forecast`：受け取った時刻に実行する。Open-Meteo を取得する。
-   - `label`：撮影の3時間30分後（アップロードが遅れたときは受け取った時刻）に実行する。Open-Meteo とアメダスを取得する。
+   - `label`：撮影の6〜7時間後（`ceil_hour(撮影 + 3時間) + 3時間`。アップロードが遅れたときは受け取った時刻）に実行する。Open-Meteo とアメダスを取得する。
    - 位置のない観測のジョブは `skipped`（`skip_reason: no_location`）になり、予約しない。
    - 予約に失敗すると PUT は 503 を返す。観測は保存済みなので、同じ内容を再送すれば予約がやり直される。
 2. 期限の来た予約を `run-due-jobs` が実行する。取得に失敗したら5分、10分、20分、40分、80分と間隔を伸ばして予約し直し、6回目の失敗で `failed` にする。

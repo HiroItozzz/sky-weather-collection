@@ -11,6 +11,7 @@ from sky_server.config import ConfigError, get_backend_name, get_data_dir
 from sky_server.jobs import JobRunner, LocalTaskScheduler, default_fetchers
 from sky_server.models import User
 from sky_server.storage import ObservationRepository
+from sky_server.weather.common import Clock, utc_now
 
 
 def create_user(repository: ObservationRepository, name: str) -> tuple[User, str]:
@@ -39,15 +40,21 @@ def revoke_user(repository: ObservationRepository, user_id: str) -> User | None:
     return user
 
 
-def run_due_jobs(scheduler: LocalTaskScheduler, runner: JobRunner, now: datetime) -> int:
+def run_due_jobs(
+    scheduler: LocalTaskScheduler,
+    runner: JobRunner,
+    now: datetime,
+    clock: Clock = utc_now,
+) -> int:
     """期限の来た予約を古い順に1回ずつ実行し、終了コードを返す。
 
     `now` のときに期限の来ていたものだけを実行する。実行中に新しく入った予約は次の起動で実行する。
+    各ジョブの実行に渡す時刻は、1件ごとに `clock` から取り直す。
     """
     failed = False
     for job_id, run_at in scheduler.due(now):
         try:
-            result, reason = runner.run(job_id, now)
+            result, reason = runner.run(job_id, clock())
         except Exception as e:
             # 予約は消さない。次の起動でまた実行される
             print(f"{job_id} error {type(e).__name__}: {e}")

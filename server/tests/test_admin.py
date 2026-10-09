@@ -1,6 +1,8 @@
 import hashlib
 from datetime import UTC, datetime, timedelta
 
+from conftest import SteppingClock
+
 from sky_server.admin import create_user, main, revoke_user, run_due_jobs
 from sky_server.jobs import LocalTaskScheduler
 from sky_server.storage import LocalObservationRepository
@@ -45,9 +47,11 @@ class FakeRunner:
         self.errors = errors
         self.reschedule = reschedule or {}
         self.called = []
+        self.nows = []
 
     def run(self, job_id, now):
         self.called.append(job_id)
+        self.nows.append(now)
         if job_id in self.errors:
             raise RuntimeError("失敗")
         if job_id in self.reschedule:
@@ -95,3 +99,14 @@ def test_例外が出ても続けて予約を残し終了コードは1(tmp_path,
 def test_コマンドは予約がなければ何もせず0で終わる(tmp_path, monkeypatch):
     monkeypatch.setenv("SKY_DATA_DIR", str(tmp_path))
     assert main(["run-due-jobs"]) == 0
+
+
+def test_実行に渡す時刻は1件ごとにclockから取り直す(tmp_path):
+    scheduler = LocalTaskScheduler(tmp_path)
+    for i in range(3):
+        scheduler.schedule(f"job{i}", T0 + timedelta(seconds=i))
+    runner = FakeRunner(scheduler)
+    clock = SteppingClock(T0 + timedelta(hours=1), timedelta(minutes=10))
+    assert run_due_jobs(scheduler, runner, T0 + timedelta(minutes=1), clock) == 0
+    assert runner.nows == [T0 + timedelta(hours=1, minutes=10 * i) for i in range(3)]
+    assert clock.calls == 3

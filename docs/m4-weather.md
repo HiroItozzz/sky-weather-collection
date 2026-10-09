@@ -13,7 +13,7 @@
 PUT /v1/observations/{id}（新規、または再送）
   └─ 天気ジョブを2つ用意する（なければ作る。予約していなければ予約する）
        ├─ forecast：アップロード直後に実行（特徴量）
-       └─ label   ：撮影の3時間30分後に実行（ラベル）
+       └─ label   ：撮影の6〜7時間後に実行（ラベル）
 
 TaskScheduler（予約）
   ├─ ローカル版：data/tasks/ に予約を書き、管理コマンド run-due-jobs が期限の来たものを実行
@@ -32,10 +32,11 @@ JobRunner.run(job_id)
 | phase | 実行する時刻 `run_at` | プロバイダー |
 |---|---|---|
 | `forecast` | 観測を受け取った時刻（`received_at`） | `open_meteo` |
-| `label` | `max(captured_at + 3時間30分, received_at)` | `open_meteo`、`amedas` |
+| `label` | `max(ceil_hour(captured_at + 3時間) + 3時間, received_at)` | `open_meteo`、`amedas` |
 
-- 3時間に足す30分は、アメダスの10分値が公開されるまでの遅れと、Open-Meteo の値が更新されるまでの余裕。
-- アップロードが遅れて `captured_at + 3時間30分` を過ぎていた場合、`label` もすぐに実行する。
+- `label` は、取得する範囲の終わり（Open-Meteo の1時間値の `ceil_hour(t+3h)`）を過ぎてから、さらに3時間待って実行する（design.md 5節）。範囲の終わりより前に取ると最後の行が予報値になること、Open-Meteo の過去の値はその時点で最新のモデル実行から来るので、待つほど実況に近くなることが理由。アメダスの10分値の公開の遅れ（数十分）もこの中に収まる。
+- アップロードが遅れてその時刻を過ぎていた場合、`label` もすぐに実行する。
+- `label` の取得では「取得する範囲の終わり ≤ 取得の直前の時刻」を確かめる（Open-Meteo は `end_hour` と `end_minutely_15`、アメダスは t+3h）。満たさなければ、再試行できる失敗として扱う。`forecast` は予報を取るのが目的で、範囲の終わりが未来になるのは当然なので、この確認をしない。
 - アップロードが撮影から大きく遅れた場合、`forecast` で取れる値は「撮影時点でわかっていた予報」ではなくなる。取得はするが、生レスポンスの封筒（5節）に `captured_at` と `fetched_at` を残し、学習時にずれの大きいものを除けるようにする。
 
 ### 2.2 ジョブの状態の形
@@ -49,8 +50,8 @@ JobRunner.run(job_id)
   "phase": "label",
   "status": "pending",
   "created_at": "2026-10-09T03:00:00+00:00",
-  "run_at": "2026-10-09T06:30:00+00:00",
-  "next_attempt_at": "2026-10-09T06:30:00+00:00",
+  "run_at": "2026-10-09T09:00:00+00:00",
+  "next_attempt_at": "2026-10-09T09:00:00+00:00",
   "enqueued": true,
   "attempts": 0,
   "max_attempts": 6,
@@ -106,7 +107,7 @@ PUT が 201（新規）と 200（再送）のどちらのときも、次の手�
 1. ジョブがなければ `ignored`（`job_not_found`）。
 2. `status` が `pending` でなければ `ignored`（`already_finished`）。同じ予約が2回届いても、2回取得しないため。
 3. `now < next_attempt_at` なら実行しない。このとき `enqueued` が false なら予約し直す。`ignored`（`not_due`）。
-4. 観測を読む。観測がなければ `status: "failed"`、`last_error: "observation_not_found"` にする。位置がなければ `skipped`（`no_location`）。
+4. 観測を読む。観測がなければ `status: "failed"`、`last_error: "observation_not_found"` で完了にする。位置がなければ `skipped`（`no_location`）で完了にする。どちらも手順 7 と同じく `completed_at` を入れ、`next_attempt_at` を null にする（2.3節で作った時点で `skipped` のジョブも同じ）。
 5. `attempts` を1増やし、`last_attempt_at` を `now` にする。
 6. `status` が `pending` のプロバイダーを順に取得する（`open_meteo` → `amedas`）。
    - アメダスが設定で無効なら `disabled` にする。
@@ -134,7 +135,7 @@ PUT が 201（新規）と 200（再送）のどちらのときも、次の手�
 uv run python -m sky_server.admin run-due-jobs
 ```
 
-- 起動したときの `now` で `due(now)` を1回だけ取り、古い順に1件ずつ `JobRunner.run` を実行する。実行中に新しく入った予約（再試行など）は、次に起動したときに実行する（1回の起動で回り続けないようにするため）。
+- 起動したときの `now` で `due(now)` を1回だけ取り、古い順に1件ずつ `JobRunner.run` を実行する。`run` に渡す `now` は1件ごとに時計から取り直す。実行中に新しく入った予約（再試行など）は、次に起動したときに実行する（1回の起動で回り続けないようにするため）。
 - 予約を消すのは、`run` が正常に戻ったあと。ただし `run` の中で同じジョブが予約し直されていたら（予約の `run_at` が変わっていたら）消さない。例外が出たときは予約が残るので、次の起動でまた実行される。
 - 1件ごとに `job_id`、結果、理由を1行で表示する。1件で予期しない例外が出ても、表示して残りを続ける。終了コードは、例外が1件でもあれば 1、なければ 0。
 - 定期的に回したいときは `watch -n 60 uv run python -m sky_server.admin run-due-jobs` などを使う（README に書く）。
@@ -183,14 +184,14 @@ uv run python -m sky_server.admin run-due-jobs
 - 観測点の一覧：`https://www.jma.go.jp/bosai/amedas/const/amedastable.json`
   - 形（不確か）：`{"44132": {"type": "A", "elems": "11112010", "lat": [35, 41.5], "lon": [139, 45.0], "alt": 25, "kjName": "東京", "knName": "トウキョウ", "enName": "Tokyo"}, ...}`。緯度経度は `[度, 分]`。
   - `elems` の2文字目が `1` の観測点を、降水量を観測している地点とみなす（不確か）。該当がなければ全地点から選ぶ。
-  - 一覧は BlobStore の `cache/amedas/amedastable.json.gz` に、取得日時つきで保存する。7日より古ければ取り直す。
+  - 一覧は BlobStore の `cache/amedas/amedastable.json.gz` に、取得日時つきで保存する。7日より古ければ取り直す。取り直しに失敗したときは（再試行できるかどうかにかかわらず）、古い一覧があればそれを使う。
 - 最寄りの3地点を、撮影地点の正確な座標からの大円距離（km、haversine、地球の半径 6371km）で選ぶ。距離の計算はサーバーの中だけで行うので、正確な座標を使う。
 - 10分値：`https://www.jma.go.jp/bosai/amedas/data/point/{地点番号}/{YYYYMMDD}_{HH}.json`
   - 日時は日本時間（JST）。`HH` は 00, 03, …, 21 で、1ファイルに3時間分が入る（不確か。ファイルの境目の時刻がどちらのファイルに入るかもわからない）。
   - 本文の形（不確か）：`{"20261009120000": {"precipitation10m": [0.0, 0], "temp": [21.3, 0], ...}, ...}`。キーは JST。
 - 取得する範囲：t-1h〜t+3h（JST に直す）。`HH` は「範囲の始まりを3時間単位に切り捨てた時刻」から「範囲の終わりを3時間単位に切り捨てた時刻」まで。4時間の範囲なので、1地点あたり2〜3ファイル、合計 6〜9 回の呼び出しになる。
 - 呼び出しの間は 1 秒あける（設定 `SKY_AMEDAS_INTERVAL_S`、テストでは 0）。
-- 404 はその地点・その時間のデータがないとみなし、失敗にはしない（封筒に状態コードを残す）。404 以外の失敗は 4.1節のとおり。1つでも再試行できる失敗があれば、そのアメダスの取得全体をやり直す（部分的な保存はしない）。
+- 404 はその地点・その時間のデータがないとみなし、そのファイルだけなら失敗にはしない（封筒に状態コードを残す）。ただし、ある観測点のファイルが1つも 200 にならなかったら、再試行できる失敗にする（design.md 5節。黙って空のラベルで完了にしないため）。データの保存期間を過ぎて取れなくなった場合は、`max_attempts` で `failed` になる。404 以外の失敗は 4.1節のとおり。1つでも再試行できる失敗があれば、そのアメダスの取得全体をやり直す（部分的な保存はしない）。
 - 範囲の外の時刻のデータもファイルに入ってくるが、切り取らずにそのまま保存する。
 
 ## 5. 生レスポンスの保存
@@ -237,6 +238,7 @@ uv run python -m sky_server.admin run-due-jobs
 ```
 
 - `body` は本文をそのままの文字列で入れる（解釈し直さないことで、元のレスポンスを失わない）。
+- `requested_at` はその HTTP 呼び出しの直前に、`fetched_at` は最初の呼び出しの直前に、時計関数から取る（ジョブの `now` は使わない。何件もまとめて実行したときに古い時刻にならないようにするため）。
 - `stations` はアメダスのときだけ。`query_location` は外部に渡した（丸めた）座標。アメダスでは外部に座標を渡さないが、比べやすいように同じ形で入れる。
 - Open-Meteo の出典は `"Weather data by Open-Meteo.com"`、ライセンスは `"CC BY 4.0"`。
 - 観測点の一覧のキャッシュも同じ形（`provider: "amedas"`、`phase: "station_table"`、`observation_id: null`、`captured_at: null`）。
@@ -293,7 +295,7 @@ server/src/sky_server/
 
 1. ローカルでサーバーを起動し、位置つきの観測を1件 PUT する。
 2. `run-due-jobs` を実行し、`forecast` のジョブが `done` になり、`SKY_DATA_DIR/weather/raw/open_meteo/...` に封筒ができることを確かめる。400 なら `last_error` を見て、`minutely_15` の変数を減らす。
-3. 3時間30分後にもう一度 `run-due-jobs` を実行し、`label` のジョブが `done` になり、アメダスの封筒の `requests` の `status` が 200 で、撮影時刻の前後の10分値が入っていることを確かめる。
+3. 撮影の6〜7時間後（`label` の `run_at`）にもう一度 `run-due-jobs` を実行し、`label` のジョブが `done` になり、アメダスの封筒の `requests` の `status` が 200 で、撮影時刻の前後の10分値が入っていることを確かめる。
 
 ## 10. GCP 版（PR-B）
 

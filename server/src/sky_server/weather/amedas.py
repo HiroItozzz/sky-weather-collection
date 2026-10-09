@@ -11,15 +11,18 @@ import httpx
 from sky_server.config import get_amedas_interval_s
 from sky_server.storage import BlobStore
 from sky_server.weather.common import (
+    Clock,
     PermanentError,
     RetryableError,
     build_envelope,
+    ensure_range_ended,
     floor_3hours,
     get_checked,
     load_envelope,
     raw_key,
     round_coord,
     save_envelope,
+    utc_now,
 )
 
 PROVIDER = "amedas"
@@ -33,6 +36,9 @@ TABLE_MAX_AGE = timedelta(days=7)
 STATION_COUNT = 3
 EARTH_RADIUS_KM = 6371.0
 JST = timezone(timedelta(hours=9))
+# 取得する範囲は撮影時刻の1時間前から3時間後まで
+RANGE_BEFORE = timedelta(hours=1)
+RANGE_AFTER = timedelta(hours=3)
 
 
 def dms_to_degrees(value: list[float]) -> float:
@@ -49,11 +55,12 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
 
 
-def load_station_table(client: httpx.Client, blob_store: BlobStore, now: datetime) -> dict:
+def load_station_table(client: httpx.Client, blob_store: BlobStore, clock: Clock = utc_now) -> dict:
     """観測点の一覧を返す。キャッシュが7日より古ければ取り直す。
 
-    取り直しに再試行できる失敗をしたときは、古いキャッシュがあればそれを使う。
+    取り直しに失敗したときは（再試行できるかどうかにかかわらず）、古いキャッシュがあればそれを使う。
     """
+    now = clock()
     stale = None
     cached = load_envelope(blob_store, TABLE_KEY)
     if cached is not None:
@@ -66,8 +73,8 @@ def load_station_table(client: httpx.Client, blob_store: BlobStore, now: datetim
         except (KeyError, IndexError, TypeError, ValueError):
             pass  # 壊れたキャッシュは使わず、取り直す
     try:
-        request = get_checked(client, TABLE_URL, {}, now)
-    except RetryableError:
+        request = get_checked(client, TABLE_URL, {}, clock)
+    except (RetryableError, PermanentError):
         if stale is None:
             raise
         return stale
@@ -120,8 +127,8 @@ def file_slots(captured_at: datetime) -> list[tuple[str, str]]:
     範囲は撮影時刻の1時間前から3時間後まで。`HH` は3時間単位で、
     範囲の始まりと終わりをそれぞれ切り捨てた時刻のあいだを3時間おきに並べる。
     """
-    start = floor_3hours(captured_at.astimezone(JST) - timedelta(hours=1))
-    last = floor_3hours(captured_at.astimezone(JST) + timedelta(hours=3))
+    start = floor_3hours(captured_at.astimezone(JST) - RANGE_BEFORE)
+    last = floor_3hours(captured_at.astimezone(JST) + RANGE_AFTER)
     slots = []
     t = start
     while t <= last:
@@ -139,36 +146,44 @@ def fetch_amedas(
     captured_at: datetime,
     lat: float,
     lon: float,
-    now: datetime,
+    clock: Clock = utc_now,
     sleep: Callable[[float], None] = time.sleep,
     interval_s: float | None = None,
 ) -> str:
     """最寄り3地点の10分値を取得して封筒を保存し、`blob_key` を返す。
 
-    404 はデータがないだけなので失敗にしない。それ以外で失敗したら例外を投げ、
-    何も保存しない（部分的な保存はしない）。
+    404 はそのファイルのデータがないだけなので失敗にしない。ただし、ある観測点のファイルが
+    1つも取れなければ再試行できる失敗にする。`label` のときは、範囲の終わり（撮影の3時間後）が
+    来ていなければ取得しない。失敗したら例外を投げ、何も保存しない（部分的な保存はしない）。
     """
+    if phase == "label":
+        ensure_range_ended(captured_at + RANGE_AFTER, clock)
     if interval_s is None:
         interval_s = get_amedas_interval_s()
-    table = load_station_table(client, blob_store, now)
+    table = load_station_table(client, blob_store, clock)
     stations = select_stations(table, lat, lon)
     if not stations:
         raise PermanentError("観測点の一覧に地点がない")
 
+    fetched_at = clock()
     requests = []
     for station in stations:
+        station_requests = []
         for date, hh in file_slots(captured_at):
-            if requests:
+            if requests or station_requests:
                 sleep(interval_s)
             url = POINT_URL.format(code=station["code"], date=date, hh=hh)
-            requests.append(get_checked(client, url, {}, now, allowed_statuses=(404,)))
+            station_requests.append(get_checked(client, url, {}, clock, allowed_statuses=(404,)))
+        if not any(r["status"] == 200 for r in station_requests):
+            raise RetryableError(f"観測点 {station['code']} のファイルがすべて取れなかった")
+        requests.extend(station_requests)
 
     envelope = build_envelope(
         provider=PROVIDER,
         phase=phase,
         observation_id=observation_id,
         captured_at=captured_at,
-        fetched_at=now,
+        fetched_at=fetched_at,
         attribution=ATTRIBUTION,
         license=LICENSE,
         query_location={"lat": round_coord(lat), "lon": round_coord(lon)},

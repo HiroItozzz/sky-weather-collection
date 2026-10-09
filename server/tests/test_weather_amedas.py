@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from conftest import SteppingClock, fixed_clock
 
 from sky_server.storage import LocalBlobStore
 from sky_server.weather.amedas import (
@@ -17,6 +18,7 @@ from sky_server.weather.amedas import (
 from sky_server.weather.common import PermanentError, RetryableError
 
 NOW = datetime(2026, 10, 9, 6, 30, 5, tzinfo=UTC)
+CLOCK = fixed_clock(NOW)
 # 撮影時刻 03:00 UTC = 12:00 JST。範囲は 11:00〜15:00 JST なので 09、12、15 の3ファイル
 CAPTURED_AT = datetime(2026, 10, 9, 3, 0, tzinfo=UTC)
 
@@ -75,16 +77,16 @@ class Server:
         return [u for u in self.urls if not u.endswith("amedastable.json")]
 
 
-def fetch(server, store, sleeps=None, captured_at=CAPTURED_AT, now=NOW):
+def fetch(server, store, sleeps=None, captured_at=CAPTURED_AT, clock=CLOCK, phase="label"):
     return fetch_amedas(
         server.client(),
         store,
         observation_id="obs-1",
-        phase="label",
+        phase=phase,
         captured_at=captured_at,
         lat=35.68,
         lon=139.76,
-        now=now,
+        clock=clock,
         sleep=(sleeps.append if sleeps is not None else lambda s: None),
         interval_s=1.0,
     )
@@ -217,7 +219,7 @@ def test_観測点の一覧はキャッシュされ再利用される(tmp_path):
     store = LocalBlobStore(tmp_path, "weather")
     server = Server()
     fetch(server, store)
-    fetch(server, store, now=NOW + timedelta(days=6, hours=23))
+    fetch(server, store, clock=fixed_clock(NOW + timedelta(days=6, hours=23)))
     assert len(server.table_calls) == 1
 
     cached = json.loads(gzip.decompress(store.get(TABLE_KEY)))
@@ -233,7 +235,7 @@ def test_観測点の一覧は7日たつと取り直す(tmp_path):
     store = LocalBlobStore(tmp_path, "weather")
     server = Server()
     fetch(server, store)
-    fetch(server, store, now=NOW + timedelta(days=7))
+    fetch(server, store, clock=fixed_clock(NOW + timedelta(days=7)))
     assert len(server.table_calls) == 2
     cached = json.loads(gzip.decompress(store.get(TABLE_KEY)))
     assert cached["fetched_at"] == "2026-10-16T06:30:05+00:00"
@@ -243,23 +245,118 @@ def test_壊れたキャッシュは取り直す(tmp_path):
     store = LocalBlobStore(tmp_path, "weather")
     store.put(TABLE_KEY, b"not gzip")
     server = Server()
-    assert load_station_table(server.client(), store, NOW) == TABLE
+    assert load_station_table(server.client(), store, CLOCK) == TABLE
     assert len(server.table_calls) == 1
 
 
-def test_古い一覧の取り直しが一時的に失敗したら古い一覧を使う(tmp_path):
+@pytest.mark.parametrize("status", [503, 403])
+def test_古い一覧の取り直しが失敗したら古い一覧を使う(tmp_path, status):
+    # 403 は再試行できない失敗だが、古い一覧があれば使う
     store = LocalBlobStore(tmp_path, "weather")
-    load_station_table(Server().client(), store, NOW)
+    load_station_table(Server().client(), store, CLOCK)
 
     def down(request):
-        return httpx.Response(503)
+        return httpx.Response(status)
 
     client = httpx.Client(transport=httpx.MockTransport(down))
-    assert load_station_table(client, store, NOW + timedelta(days=8)) == TABLE
+    assert load_station_table(client, store, fixed_clock(NOW + timedelta(days=8))) == TABLE
+
+
+def test_一覧がなく取得が再試行できない失敗なら例外になる(tmp_path):
+    store = LocalBlobStore(tmp_path, "weather")
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(403)))
+    with pytest.raises(PermanentError):
+        load_station_table(client, store, CLOCK)
 
 
 def test_一覧がなく取得が一時的に失敗したら例外になる(tmp_path):
     store = LocalBlobStore(tmp_path, "weather")
     client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(503)))
     with pytest.raises(RetryableError):
-        load_station_table(client, store, NOW)
+        load_station_table(client, store, CLOCK)
+
+
+def test_古い一覧の取り直しが403でも取得は古い一覧で続く(tmp_path):
+    store = LocalBlobStore(tmp_path, "weather")
+    fetch(Server(), store)
+    server = Server()
+    original = server.__call__
+
+    def handler(request):
+        if str(request.url).endswith("amedastable.json"):
+            server.urls.append(str(request.url))
+            return httpx.Response(403)
+        return original(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    key = fetch_amedas(
+        client,
+        store,
+        observation_id="obs-1",
+        phase="label",
+        captured_at=CAPTURED_AT,
+        lat=35.68,
+        lon=139.76,
+        clock=fixed_clock(NOW + timedelta(days=8)),
+        sleep=lambda s: None,
+        interval_s=0,
+    )
+    assert len(server.table_calls) == 1
+    envelope = json.loads(gzip.decompress(store.get(key)))
+    assert [s["code"] for s in envelope["stations"]] == ["10001", "10002", "10003"]
+
+
+def test_観測点のファイルがすべて404ならRetryableErrorで保存しない(tmp_path):
+    store = LocalBlobStore(tmp_path, "weather")
+    server = Server(not_found=("/10002/",))
+    with pytest.raises(RetryableError, match="10002"):
+        fetch(server, store)
+    assert store.get("raw/amedas/obs-1/label.json.gz") is None
+
+
+def test_観測点のファイルが1つでも200なら成功する(tmp_path):
+    store = LocalBlobStore(tmp_path, "weather")
+    server = Server(not_found=("/10002/20261009_09", "/10002/20261009_12"))
+    key = fetch(server, store)
+    envelope = json.loads(gzip.decompress(store.get(key)))
+    statuses = [r["status"] for r in envelope["requests"]]
+    assert statuses.count(404) == 2
+    assert statuses.count(200) == 7
+
+
+def test_labelは範囲の終わりより前なら何も呼ばずRetryableError(tmp_path):
+    # 撮影 03:00 UTC の範囲の終わりは 06:00 UTC（撮影の3時間後）
+    store = LocalBlobStore(tmp_path, "weather")
+    server = Server()
+    just_before = datetime(2026, 10, 9, 6, 0, tzinfo=UTC) - timedelta(seconds=1)
+    with pytest.raises(RetryableError):
+        fetch(server, store, clock=fixed_clock(just_before))
+    assert server.urls == []
+    assert store.get("raw/amedas/obs-1/label.json.gz") is None
+
+
+def test_labelは範囲の終わりちょうどなら取得する(tmp_path):
+    store = LocalBlobStore(tmp_path, "weather")
+    server = Server()
+    key = fetch(server, store, clock=fixed_clock(datetime(2026, 10, 9, 6, 0, tzinfo=UTC)))
+    assert len(server.point_calls) == 9
+    assert store.get(key) is not None
+
+
+def test_forecastは範囲の終わりが未来でも取得する(tmp_path):
+    store = LocalBlobStore(tmp_path, "weather")
+    server = Server()
+    key = fetch(server, store, phase="forecast", clock=fixed_clock(CAPTURED_AT))
+    assert len(server.point_calls) == 9
+    assert key == "raw/amedas/obs-1/forecast.json.gz"
+
+
+def test_requested_atは呼び出しごとにclockの値になる(tmp_path):
+    store = LocalBlobStore(tmp_path, "weather")
+    clock = SteppingClock(NOW, timedelta(seconds=1))
+    key = fetch(Server(), store, clock=clock)
+    envelope = json.loads(gzip.decompress(store.get(key)))
+    times = [r["requested_at"] for r in envelope["requests"]]
+    assert len(times) == 9
+    assert times == sorted(set(times))  # 1件ごとに違う値で、古い順に並ぶ
+    assert envelope["fetched_at"] < times[0]

@@ -2,7 +2,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from conftest import IMAGE, OBSERVATION_ID, Api, make_metadata
+from conftest import IMAGE, OBSERVATION_ID, Api, SteppingClock, fixed_clock, make_metadata
 from fastapi.testclient import TestClient
 
 from sky_server.jobs import (
@@ -19,6 +19,7 @@ from sky_server.weather.common import PermanentError, RetryableError
 
 CAPTURED_AT = datetime(2026, 10, 9, 3, 0, tzinfo=UTC)
 RECEIVED_AT = CAPTURED_AT + timedelta(minutes=1)
+CLOCK_NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
 FORECAST_ID = f"{OBSERVATION_ID}_forecast"
 LABEL_ID = f"{OBSERVATION_ID}_label"
 
@@ -40,13 +41,19 @@ class FakeFetcher:
 
 
 class FailingScheduler(LocalTaskScheduler):
-    """`failing` が True の間は予約に失敗する。"""
+    """`failing` が True の間は予約に失敗する。`schedule` の呼び出しはすべて `calls` に残す。
+
+    予約ファイルは上書きされるので、二重に予約してもファイルを見ただけではわからない。
+    呼び出しの記録で、予約した回数を確かめる。
+    """
 
     def __init__(self, root) -> None:
         super().__init__(root)
         self.failing = False
+        self.calls: list[tuple[str, datetime]] = []
 
     def schedule(self, job_id, run_at) -> None:
+        self.calls.append((job_id, run_at))
         if self.failing:
             raise RuntimeError("予約できない")
         super().schedule(job_id, run_at)
@@ -65,7 +72,7 @@ def make_record(location: bool = True) -> dict:
 class Env:
     """ジョブのテストに使う部品をまとめたもの。"""
 
-    def __init__(self, root, amedas_enabled: bool = True) -> None:
+    def __init__(self, root, amedas_enabled: bool = True, clock=None) -> None:
         self.observations = LocalObservationRepository(root)
         self.jobs = LocalJobRepository(root)
         self.scheduler = FailingScheduler(root)
@@ -77,6 +84,7 @@ class Env:
             self.scheduler,
             {"open_meteo": self.open_meteo, "amedas": self.amedas},
             amedas_enabled=amedas_enabled,
+            clock=clock or fixed_clock(CLOCK_NOW),
         )
 
     def add_observation(self, location: bool = True) -> dict:
@@ -93,7 +101,8 @@ def env(tmp_path) -> Env:
     return Env(tmp_path)
 
 
-LABEL_RUN_AT = CAPTURED_AT + timedelta(hours=3, minutes=30)
+# 撮影 03:00 UTC なら、範囲の終わりは 06:00、その3時間後の 09:00 に実行する
+LABEL_RUN_AT = CAPTURED_AT + timedelta(hours=6)
 
 
 def test_待ち時間は5分から倍に増えて2時間で止まる():
@@ -126,18 +135,37 @@ def test_2つのジョブが作られて予約される(env):
 
 def test_アップロードが遅れたらlabelもすぐ実行する(env):
     record = env.add_observation()
-    record["received_at"] = (CAPTURED_AT + timedelta(hours=5)).isoformat()
+    received_at = CAPTURED_AT + timedelta(hours=10)
+    record["received_at"] = received_at.isoformat()
     env.ensure(record)
-    assert env.jobs.get_job(LABEL_ID).run_at == CAPTURED_AT + timedelta(hours=5)
+    assert env.jobs.get_job(LABEL_ID).run_at == received_at
+
+
+def test_撮影から6時間後のちょうどの境目(env):
+    # 撮影 03:00 ちょうどなら範囲の終わりは 06:00 で、実行は 09:00
+    record = env.add_observation()
+    env.ensure(record)
+    assert env.jobs.get_job(LABEL_ID).run_at == datetime(2026, 10, 9, 9, 0, tzinfo=UTC)
+
+
+def test_撮影が1分遅れると実行は1時間遅れる(tmp_path):
+    # 撮影 03:01 なら t+3h は 06:01 で、範囲の終わりは 07:00 に切り上がり、実行は 10:00
+    env = Env(tmp_path)
+    record = env.add_observation()
+    record["captured_at"] = datetime(2026, 10, 9, 3, 1, tzinfo=UTC).isoformat()
+    env.ensure(record)
+    assert env.jobs.get_job(LABEL_ID).run_at == datetime(2026, 10, 9, 10, 0, tzinfo=UTC)
 
 
 def test_何度呼んでもジョブも予約も増えない(env):
     record = env.add_observation()
     env.ensure(record)
     before = env.jobs.get_job(LABEL_ID)
+    assert env.scheduler.calls == [(FORECAST_ID, RECEIVED_AT), (LABEL_ID, LABEL_RUN_AT)]
     env.ensure(record)
     assert env.jobs.get_job(LABEL_ID) == before
-    assert len(env.scheduler.due(LABEL_RUN_AT)) == 2
+    # 2回目の呼び出しでは予約しない
+    assert len(env.scheduler.calls) == 2
 
 
 def test_位置がなければskippedで予約しない(env):
@@ -147,6 +175,9 @@ def test_位置がなければskippedで予約しない(env):
         assert job.status == "skipped"
         assert job.skip_reason == "no_location"
         assert not job.enqueued
+        assert job.completed_at == RECEIVED_AT
+        assert job.next_attempt_at is None
+    assert env.scheduler.calls == []
     assert env.scheduler.due(LABEL_RUN_AT) == []
 
 
@@ -179,6 +210,8 @@ def test_forecastの成功(env):
     assert call["captured_at"] == CAPTURED_AT
     assert (call["lat"], call["lon"]) == (35.68, 139.76)
     assert call["phase"] == "forecast"
+    assert call["clock"]() == CLOCK_NOW
+    assert "now" not in call
     assert env.amedas.calls == []
 
 
@@ -242,6 +275,8 @@ def test_観測がなければfailed(env):
     job = env.jobs.get_job(FORECAST_ID)
     assert job.status == "failed"
     assert job.last_error == "observation_not_found"
+    assert job.completed_at == RECEIVED_AT
+    assert job.next_attempt_at is None
     assert env.open_meteo.calls == []
 
 
@@ -254,6 +289,9 @@ def test_実行時に位置がなければskipped(env):
     assert env.runner.run(FORECAST_ID, RECEIVED_AT) == ("ran", "no_location")
     job = env.jobs.get_job(FORECAST_ID)
     assert (job.status, job.skip_reason) == ("skipped", "no_location")
+    assert job.completed_at == RECEIVED_AT
+    assert job.next_attempt_at is None
+    assert env.open_meteo.calls == []
 
 
 def test_再試行できない失敗はfailedになる(env):
@@ -408,11 +446,45 @@ def test_予約は古い順に返りrun_atが一致するときだけ消える(t
     assert [job_id for job_id, _ in scheduler.due(t0 + timedelta(hours=1))] == ["a", "c"]
 
 
-def test_add_jobは同じIDなら保存せずFalse(env):
+def test_add_jobは同じIDなら保存せずFalseで元の内容が変わらない(env):
     env.ensure(env.add_observation())
-    job = env.jobs.get_job(FORECAST_ID)
-    assert env.jobs.add_job(job) is False
+    original = env.jobs.get_job(FORECAST_ID)
+    changed = original.model_copy(update={"attempts": 3, "last_error": "別の内容"})
+    assert env.jobs.add_job(changed) is False
+    assert env.jobs.get_job(FORECAST_ID) == original
+    assert list(env.jobs._dir.glob("*.tmp")) == []
     assert env.jobs.get_job("nothing") is None
+
+
+def test_add_jobで新しく作ったときも一時ファイルが残らない(env):
+    env.ensure(env.add_observation())
+    assert sorted(p.name for p in env.jobs._dir.iterdir()) == sorted(
+        [f"{FORECAST_ID}.json", f"{LABEL_ID}.json"]
+    )
+
+
+def test_add_observationは同じIDなら保存せずFalseで一時ファイルが残らない(env):
+    record = make_record()
+    assert env.observations.add_observation(record) is True
+    changed = {**record, "user_id": "other"}
+    assert env.observations.add_observation(changed) is False
+    assert env.observations.get_observation(OBSERVATION_ID) == record
+    assert sorted(p.name for p in env.observations._observations.iterdir()) == [
+        f"{OBSERVATION_ID}.json"
+    ]
+
+
+def test_取得関数にはnowではなくclockを渡す(tmp_path):
+    clock = SteppingClock(CLOCK_NOW, timedelta(minutes=1))
+    env = Env(tmp_path, clock=clock)
+    env.ensure(env.add_observation())
+    env.runner.run(LABEL_ID, LABEL_RUN_AT)
+    for fetcher in (env.open_meteo, env.amedas):
+        (call,) = fetcher.calls
+        assert "now" not in call
+        assert call["clock"] is clock
+    # JobRunner 自身は時計を呼ばない。呼ぶのは取得関数だけ
+    assert clock.calls == 0
 
 
 @pytest.fixture
@@ -436,15 +508,18 @@ def test_PUTの201で2つのジョブが予約される(put_env):
     assert env.jobs.get_job(FORECAST_ID).enqueued
     assert env.jobs.get_job(LABEL_ID).enqueued
     assert len(env.scheduler.due(datetime.now(UTC) + timedelta(days=1))) == 2
+    assert sorted(job_id for job_id, _ in env.scheduler.calls) == [FORECAST_ID, LABEL_ID]
 
 
 def test_PUTの再送でジョブは増えない(put_env):
     env, api, token = put_env
     api.put(token)
     before = env.jobs.get_job(LABEL_ID)
+    assert len(env.scheduler.calls) == 2
     assert api.put(token).status_code == 200
     assert env.jobs.get_job(LABEL_ID) == before
-    assert len(env.scheduler.due(datetime.now(UTC) + timedelta(days=1))) == 2
+    # 再送では予約を呼ばない
+    assert len(env.scheduler.calls) == 2
 
 
 def test_PUTで位置がなければskippedのジョブができる(put_env):

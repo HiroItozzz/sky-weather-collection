@@ -2,6 +2,7 @@
 
 import gzip
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -12,6 +13,13 @@ USER_AGENT = "sky-weather-collection/0.1 (+https://github.com/hiroitozzz/sky-wea
 TIMEOUT_S = 20.0
 ENVELOPE_VERSION = 1
 ERROR_BODY_LIMIT = 500
+
+# 現在時刻を返す関数。テストでは固定の時刻を返すものに差し替える
+Clock = Callable[[], datetime]
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 class RetryableError(Exception):
@@ -86,14 +94,15 @@ def get_checked(
     client: httpx.Client,
     url: str,
     params: dict[str, str],
-    now: datetime,
+    clock: Clock,
     allowed_statuses: tuple[int, ...] = (),
 ) -> dict:
     """GET して、封筒の `requests` に入れる1件分の記録を返す。
 
     `allowed_statuses` に含まれる状態コードは失敗にせず、本文の検査もしない。
-    接続エラーとタイムアウトは `RetryableError` にする。
+    接続エラーとタイムアウトは `RetryableError` にする。`requested_at` は呼び出しの直前の時刻。
     """
+    requested_at = clock()
     try:
         response = client.get(url, params=params)
     except httpx.TransportError as e:
@@ -104,9 +113,18 @@ def get_checked(
         "url": url,
         "params": params,
         "status": response.status_code,
-        "requested_at": now.astimezone(UTC).isoformat(),
+        "requested_at": requested_at.astimezone(UTC).isoformat(),
         "body": response.text,
     }
+
+
+def ensure_range_ended(range_end: datetime, clock: Clock) -> None:
+    """取得する範囲の終わりがまだ来ていなければ、再試行できる失敗にする（ラベル用）。"""
+    now = clock()
+    if now < range_end:
+        raise RetryableError(
+            f"取得する範囲の終わり（{range_end.astimezone(UTC).isoformat()}）がまだ来ていない"
+        )
 
 
 def raw_key(provider: str, observation_id: str, phase: str) -> str:

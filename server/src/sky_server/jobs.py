@@ -1,7 +1,6 @@
 """天気データの取得ジョブ：状態の保存、実行の予約、実行（M4：ローカル版）。"""
 
 import json
-import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -11,9 +10,9 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel
 
 from sky_server.config import get_amedas_enabled
-from sky_server.storage import BlobStore, ObservationRepository, _write_atomic
+from sky_server.storage import BlobStore, ObservationRepository, _create_exclusive, _write_atomic
 from sky_server.weather.amedas import fetch_amedas
-from sky_server.weather.common import PermanentError, create_client
+from sky_server.weather.common import Clock, PermanentError, ceil_hour, create_client, utc_now
 from sky_server.weather.open_meteo import fetch_open_meteo
 
 PHASES = ("forecast", "label")
@@ -23,9 +22,10 @@ PHASE_PROVIDERS = {
     "label": ("open_meteo", "amedas"),
 }
 
-# ラベルは、アメダスの10分値が公開されるまでの遅れと Open-Meteo の更新の余裕を見て
-# 撮影のこれだけ後に取る
-LABEL_DELAY = timedelta(hours=3, minutes=30)
+# ラベルは、取得する範囲の終わり（ceil_hour(撮影 + 3時間)）からさらにこれだけ待って取る。
+# Open-Meteo の過去の値は最新のモデル実行から来るので、待つほど実況に近くなる
+LABEL_RANGE_END = timedelta(hours=3)
+LABEL_WAIT = timedelta(hours=3)
 # Cloud Tasks とサーバーの時計のずれで、予約より少し早く届いても実行する
 DUE_MARGIN = timedelta(minutes=2)
 MAX_ATTEMPTS = 6
@@ -33,7 +33,7 @@ BASE_WAIT = timedelta(minutes=5)
 MAX_WAIT = timedelta(hours=2)
 LAST_ERROR_LIMIT = 1000
 
-# 取得関数：observation_id, phase, captured_at, lat, lon, now をキーワード引数で受け取り、
+# 取得関数：observation_id, phase, captured_at, lat, lon, clock をキーワード引数で受け取り、
 # blob_key を返す
 Fetcher = Callable[..., str]
 
@@ -94,14 +94,7 @@ class LocalJobRepository(JobRepository):
 
     def add_job(self, job: WeatherJob) -> bool:
         path = self._dir / f"{job.job_id}.json"
-        try:
-            # 排他的に作成して、同時に同じジョブが作られたときに片方だけが成功するようにする
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-        except FileExistsError:
-            return False
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(job.model_dump_json(indent=2))
-        return True
+        return _create_exclusive(path, job.model_dump_json(indent=2).encode())
 
     def get_job(self, job_id: str) -> WeatherJob | None:
         path = self._dir / f"{job_id}.json"
@@ -161,7 +154,8 @@ def _new_job(record: dict, phase: str, now: datetime) -> WeatherJob:
     if phase == "forecast":
         run_at = received_at
     else:
-        run_at = max(_parse_time(record["captured_at"]) + LABEL_DELAY, received_at)
+        range_end = ceil_hour(_parse_time(record["captured_at"]) + LABEL_RANGE_END)
+        run_at = max(range_end + LABEL_WAIT, received_at)
     job = WeatherJob(
         job_id=f"{observation_id}_{phase}",
         observation_id=observation_id,
@@ -172,9 +166,7 @@ def _new_job(record: dict, phase: str, now: datetime) -> WeatherJob:
         providers={name: ProviderState() for name in PHASE_PROVIDERS[phase]},
     )
     if record.get("location") is None:
-        job.status = "skipped"
-        job.skip_reason = "no_location"
-        job.next_attempt_at = None
+        _finish(job, "skipped", now, skip_reason="no_location")
     return job
 
 
@@ -232,12 +224,15 @@ class JobRunner:
         scheduler: TaskScheduler,
         fetchers: dict[str, Fetcher],
         amedas_enabled: bool | None = None,
+        clock: Clock = utc_now,
     ) -> None:
         self._observations = observations
         self._jobs = jobs
         self._scheduler = scheduler
         self._fetchers = fetchers
         self._amedas_enabled = get_amedas_enabled() if amedas_enabled is None else amedas_enabled
+        # 取得関数に渡す時計。封筒の取得時刻やラベルの範囲の確認は、ジョブの now ではなくこれで取る
+        self._clock = clock
 
     def run(self, job_id: str, now: datetime | None = None) -> tuple[str, str | None]:
         """戻り値は `("ran" | "ignored", 理由 | None)`。"""
@@ -254,14 +249,13 @@ class JobRunner:
 
         record = self._observations.get_observation(job.observation_id)
         if record is None:
-            job.status = "failed"
             job.last_error = "observation_not_found"
+            _finish(job, "failed", now)
             self._jobs.update_job(job)
             return "ran", "observation_not_found"
         location = record.get("location")
         if location is None:
-            job.status = "skipped"
-            job.skip_reason = "no_location"
+            _finish(job, "skipped", now, skip_reason="no_location")
             self._jobs.update_job(job)
             return "ran", "no_location"
 
@@ -282,7 +276,7 @@ class JobRunner:
                     captured_at=captured_at,
                     lat=location["lat"],
                     lon=location["lon"],
-                    now=now,
+                    clock=self._clock,
                 )
             except PermanentError as e:
                 state.status = "failed"
@@ -301,12 +295,14 @@ class JobRunner:
         pending = [state for state in job.providers.values() if state.status == "pending"]
         if not pending:
             failed = any(state.status == "failed" for state in job.providers.values())
-            self._finish(job, "failed" if failed else "done", now)
+            _finish(job, "failed" if failed else "done", now)
+            self._jobs.update_job(job)
         elif job.attempts >= job.max_attempts:
             for state in pending:
                 state.status = "failed"
                 state.error = f"{state.error}; max_attempts" if state.error else "max_attempts"
-            self._finish(job, "failed", now)
+            _finish(job, "failed", now)
+            self._jobs.update_job(job)
         else:
             job.next_attempt_at = now + wait_time(job.attempts)
             job.enqueued = False
@@ -314,11 +310,18 @@ class JobRunner:
             _enqueue(job, self._jobs, self._scheduler)
         return "ran", None
 
-    def _finish(self, job: WeatherJob, status: Literal["done", "failed"], now: datetime) -> None:
-        job.status = status
-        job.completed_at = now
-        job.next_attempt_at = None
-        self._jobs.update_job(job)
+
+def _finish(
+    job: WeatherJob,
+    status: Literal["done", "failed", "skipped"],
+    now: datetime,
+    skip_reason: str | None = None,
+) -> None:
+    """ジョブを完了にする。完了したジョブは `completed_at` があり、`next_attempt_at` は null。"""
+    job.status = status
+    job.completed_at = now
+    job.next_attempt_at = None
+    job.skip_reason = skip_reason
 
 
 def _describe(error: Exception) -> str:
