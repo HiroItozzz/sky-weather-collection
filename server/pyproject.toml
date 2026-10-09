@@ -8,12 +8,12 @@ dependencies = [
     "uvicorn",
     "pydantic>=2",
     "python-multipart",
+    "httpx",
 ]
 
 [dependency-groups]
 dev = [
     "pytest",
-    "httpx",
     "ruff",
 ]
 

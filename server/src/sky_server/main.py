@@ -8,10 +8,19 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi import Path as PathParam
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from sky_server.auth import hash_token
 from sky_server.config import get_data_dir
+from sky_server.jobs import (
+    JobRepository,
+    JobRunner,
+    LocalJobRepository,
+    LocalTaskScheduler,
+    TaskScheduler,
+    default_fetchers,
+    ensure_weather_jobs,
+)
 from sky_server.models import UUID_PATTERN, ObservationMetadata, User
 from sky_server.storage import (
     BlobStore,
@@ -19,21 +28,39 @@ from sky_server.storage import (
     LocalObservationRepository,
     ObservationRepository,
 )
+from sky_server.task_auth import TaskAuthenticator, get_task_authenticator
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 ObservationId = Annotated[str, PathParam(pattern=UUID_PATTERN)]
+
+JOB_ID_PATTERN = UUID_PATTERN[:-1] + r"_(forecast|label)$"
+
+
+class FetchWeatherRequest(BaseModel):
+    job_id: str = Field(pattern=JOB_ID_PATTERN)
 
 
 def create_app(
     data_dir: Path | None = None,
     repository: ObservationRepository | None = None,
     blob_store: BlobStore | None = None,
+    job_repository: JobRepository | None = None,
+    scheduler: TaskScheduler | None = None,
+    runner: JobRunner | None = None,
+    task_auth: TaskAuthenticator | None = None,
 ) -> FastAPI:
     if data_dir is None:
         data_dir = get_data_dir()
     repository = repository or LocalObservationRepository(data_dir)
     blob_store = blob_store or LocalBlobStore(data_dir)
+    job_repository = job_repository or LocalJobRepository(data_dir)
+    scheduler = scheduler or LocalTaskScheduler(data_dir)
+    if runner is None:
+        weather_store = LocalBlobStore(data_dir, "weather")
+        runner = JobRunner(repository, job_repository, scheduler, default_fetchers(weather_store))
+    # SKY_TASK_AUTH の値が正しくなければ、ここで起動時にエラーになる
+    task_auth = task_auth or get_task_authenticator()
 
     app = FastAPI(title="sky-weather-collection")
 
@@ -53,6 +80,23 @@ def create_app(
         return user
 
     CurrentUser = Annotated[User, Depends(current_user)]
+
+    def authenticate_task(request: Request) -> None:
+        task_auth(request)
+
+    def reserve_weather_jobs(record: dict) -> None:
+        """天気ジョブを用意する。予約に失敗したら 503 にして、再送でやり直してもらう。"""
+        try:
+            ensure_weather_jobs(record, job_repository, scheduler)
+        except Exception as e:
+            raise HTTPException(
+                503, "天気データの取得の予約に失敗しました。しばらくしてからもう一度送ってください"
+            ) from e
+
+    def exists_response(existing: dict, user: User, meta: ObservationMetadata) -> JSONResponse:
+        response = _duplicate_response(existing, user, meta)
+        reserve_weather_jobs(existing)
+        return response
 
     @app.get("/healthz")
     def healthz() -> dict:
@@ -84,7 +128,7 @@ def create_app(
 
         existing = repository.get_observation(observation_id)
         if existing is not None:
-            return _duplicate_response(existing, user, meta)
+            return exists_response(existing, user, meta)
 
         # キーにハッシュを含めて、同じ ID で別の画像が同時に来ても上書きし合わないようにする
         image_key = _image_key(observation_id, meta.image_sha256)
@@ -95,7 +139,8 @@ def create_app(
             existing = repository.get_observation(observation_id)
             if existing is None:
                 raise HTTPException(500, "保存に失敗しました")
-            return _duplicate_response(existing, user, meta)
+            return exists_response(existing, user, meta)
+        reserve_weather_jobs(record)
         return JSONResponse({"observation_id": observation_id, "status": "created"}, 201)
 
     @app.get("/v1/observations/{observation_id}")
@@ -105,6 +150,18 @@ def create_app(
         if record is None or record["user_id"] != user.user_id:
             raise HTTPException(404, "観測が見つかりません")
         return {"observation_id": observation_id, "received_at": record["received_at"]}
+
+    @app.post("/internal/tasks/fetch-weather", dependencies=[Depends(authenticate_task)])
+    def fetch_weather(body: FetchWeatherRequest) -> dict:
+        job_id = body.job_id.lower()
+        result, reason = runner.run(job_id, datetime.now(UTC))
+        job = job_repository.get_job(job_id)
+        return {
+            "job_id": job_id,
+            "result": result,
+            "reason": reason,
+            "status": job.status if job else None,
+        }
 
     return app
 

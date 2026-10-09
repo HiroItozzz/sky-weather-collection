@@ -1,7 +1,7 @@
 import copy
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -56,6 +56,26 @@ def make_metadata(image: bytes = IMAGE, observation_id: str = OBSERVATION_ID) ->
         "user_guess": None,
         "image_sha256": hashlib.sha256(image).hexdigest(),
     }
+
+
+def fixed_clock(t: datetime):
+    """いつも同じ時刻を返す時計。"""
+    return lambda: t
+
+
+class SteppingClock:
+    """呼ばれるたびに `step` ずつ進む時計。呼ばれた回数は `calls` に残る。"""
+
+    def __init__(self, start: datetime, step: timedelta) -> None:
+        self._next = start
+        self._step = step
+        self.calls = 0
+
+    def __call__(self) -> datetime:
+        now = self._next
+        self._next += self._step
+        self.calls += 1
+        return now
 
 
 class Api:

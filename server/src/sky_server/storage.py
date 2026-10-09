@@ -33,7 +33,7 @@ class ObservationRepository(ABC):
 
 
 class BlobStore(ABC):
-    """画像の保存先。"""
+    """画像や天気データ（バイト列）の保存先。"""
 
     @abstractmethod
     def put(self, key: str, data: bytes) -> None: ...
@@ -78,19 +78,13 @@ class LocalObservationRepository(ObservationRepository):
 
     def add_observation(self, record: dict) -> bool:
         path = self._observations / f"{record['observation_id']}.json"
-        try:
-            # 排他的に作成して、同時に同じ ID が来たときに片方だけが成功するようにする
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-        except FileExistsError:
-            return False
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(record, f, ensure_ascii=False, indent=2)
-        return True
+        data = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
+        return _create_exclusive(path, data)
 
 
 class LocalBlobStore(BlobStore):
-    def __init__(self, root: Path) -> None:
-        self._root = root / "images"
+    def __init__(self, root: Path, dirname: str = "images") -> None:
+        self._root = root / dirname
         self._root.mkdir(parents=True, exist_ok=True)
 
     def put(self, key: str, data: bytes) -> None:
@@ -101,6 +95,25 @@ class LocalBlobStore(BlobStore):
     def get(self, key: str) -> bytes | None:
         path = self._root / key
         return path.read_bytes() if path.exists() else None
+
+
+def _create_exclusive(path: Path, data: bytes) -> bool:
+    """ファイルがなければ `data` で作って True、すでにあれば何もせず False を返す。
+
+    一時ファイルに書き終えてからハードリンクで置くので、書きかけのファイルが見えることはない。
+    同時に同じパスを作ろうとしても、リンクに成功するのは片方だけ。
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        os.unlink(tmp)
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
