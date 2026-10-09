@@ -162,7 +162,7 @@ DeviceMotion の角度からのテスト（`rotationFromDeviceMotion` 用）。
 
 - `magneticModel(lat, lon, altitudeM, date): { declinationDeg: number; totalIntensityUT: number }`
   - `geomagnetism.model(date).point([lat, lon, altitudeKm])` を使う。高度が null なら 0 km とする。全磁力 f は nT なので µT に直す。
-  - 期限切れ（WMM2025 の有効期間外）のときも例外にせず、最新のモデルで計算する（ライブラリの既定の動作）。
+  - 期限切れ（WMM2025 の有効期間外）のときも例外にせず、最新のモデルで計算する。ライブラリの既定では例外になるので、`allowOutOfBoundsModel: true` を指定する（このとき `console.error` に警告が出る）。
 - テスト：2026-10-09 の東京（35.68, 139.77）で偏角が -8.4〜-7.4、全磁力が 44〜48 µT。札幌（43.06, 141.35）の偏角が東京より西に大きい。
 
 ## 5. 記録の JSON（`app/src/record.ts`）
