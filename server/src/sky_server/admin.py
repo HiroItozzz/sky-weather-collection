@@ -1,9 +1,11 @@
 """管理用コマンド：撮影者の作成・無効化・削除、プライバシーゾーンと公開への同意、天気ジョブの実行、要約の作り直し。"""
 
 import argparse
+import math
 import sys
 import uuid
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from sky_server.auth import generate_token, hash_token
 from sky_server.backends import Backend, build_backend
@@ -20,10 +22,13 @@ from sky_server.jobs import (
 )
 from sky_server.models import PrivacyZone, User, to_utc_millis
 from sky_server.storage import BlobStore, ObservationRepository
-from sky_server.weather.common import Clock, raw_key, utc_now
+from sky_server.weather.common import Clock, utc_now
 
 # 天気の生レスポンスの保存先を探すときの提供元（ジョブが残っていなくても消せるようにする）
 RAW_PROVIDERS = ("open_meteo", "amedas")
+
+# delete-user の1回目から、撮影者を消せるようになるまでの時間（実行中のジョブの書き戻しを待つ）
+DELETION_WAIT = timedelta(minutes=10)
 
 
 def create_user(repository: ObservationRepository, name: str) -> tuple[User, str]:
@@ -95,11 +100,14 @@ def delete_observation_data(
     weather_store: BlobStore,
     job_repository: JobRepository,
 ) -> None:
-    """観測1件と、それに付くジョブ・天気の生レスポンス・画像を消す。観測そのものは最後に消す。"""
-    blob_keys = {
-        raw_key(provider, observation_id, phase) for provider in RAW_PROVIDERS for phase in PHASES
-    }
+    """観測1件と、それに付くジョブ・天気の生レスポンス・画像を消す。観測そのものは最後に消す。
+
+    画像と生レスポンスは、`{id}/` のような接頭辞で消す。同じ ID で別の画像が送られて 409 に
+    なったときに、先に保存された画像が残らないようにするため。
+    """
     job_ids = [f"{observation_id}_{phase}" for phase in PHASES]
+    # ジョブの blob_key が標準の場所と違うときのために、先に集めておく
+    blob_keys: set[str] = set()
     for job_id in job_ids:
         job = job_repository.get_job(job_id)
         if job is not None:
@@ -107,13 +115,26 @@ def delete_observation_data(
                 state.blob_key for state in job.providers.values() if state.blob_key is not None
             )
     # 生レスポンスを先に消す。ジョブを先に消すと、途中で失敗したときに blob_key がわからなくなる
+    for provider in RAW_PROVIDERS:
+        weather_store.delete_prefix(f"raw/{provider}/{observation_id}/")
     for key in sorted(blob_keys):
         weather_store.delete(key)
     for job_id in job_ids:
         job_repository.delete_job(job_id)
+    blob_store.delete_prefix(f"{observation_id}/")
     if record.get("image_key"):
         blob_store.delete(record["image_key"])
     repository.delete_observation(observation_id)
+
+
+@dataclass(frozen=True)
+class DeletionResult:
+    """`delete_user_data` の結果。"""
+
+    observation_count: int
+    # 撮影者まで消したか。False なら、あと `remaining` たってからもう一度実行する
+    finished: bool
+    remaining: timedelta
 
 
 def delete_user_data(
@@ -122,25 +143,45 @@ def delete_user_data(
     blob_store: BlobStore,
     weather_store: BlobStore,
     job_repository: JobRepository,
-) -> int:
-    """撮影者と、その撮影者のデータをすべて消し、消した観測の数を返す。
+    clock: Clock = utc_now,
+) -> DeletionResult:
+    """撮影者のデータを2段階で消す。
 
-    観測ごとのデータ、送信数の記録、撮影者の順に消す。途中で失敗しても、もう一度実行すれば
-    残りを消せるように、撮影者そのものは最後に消す。
+    実行中のジョブが、消したあとに状態や生レスポンスを書き戻すことがある。そのため、撮影者を
+    無効にして消した観測の ID を記録し、観測ごとのデータを消す。撮影者は残し、`DELETION_WAIT`
+    以上たってからの実行で、もう一度観測ごとのデータを消したうえで、送信数の記録と撮影者を消す。
+    途中で失敗しても、もう一度実行すれば残りを消せる（撮影者そのものは最後に消す）。
+    撮影者がいなければ KeyError。
     """
-    records = repository.list_observations_by_user(user_id)
-    for record in records:
+    user = repository.get_user(user_id)
+    if user is None:
+        raise KeyError(user_id)
+    now = clock()
+    started_at = user.deletion_started_at or now
+    user = user.model_copy(
+        update={"revoked_at": user.revoked_at or now, "deletion_started_at": started_at}
+    )
+    repository.update_user(user)
+
+    ids = list(user.deletion_observation_ids)
+    for record in repository.list_observations_by_user(user_id):
+        if record["observation_id"] not in ids:
+            ids.append(record["observation_id"])
+    user = user.model_copy(update={"deletion_observation_ids": ids})
+    repository.update_user(user)
+
+    for observation_id in ids:
+        record = repository.get_observation(observation_id) or {}
         delete_observation_data(
-            record["observation_id"],
-            record,
-            repository,
-            blob_store,
-            weather_store,
-            job_repository,
+            observation_id, record, repository, blob_store, weather_store, job_repository
         )
+
+    remaining = started_at + DELETION_WAIT - now
+    if remaining > timedelta(0):
+        return DeletionResult(len(ids), False, remaining)
     repository.delete_daily_counts(user_id)
     repository.delete_user(user_id)
-    return len(records)
+    return DeletionResult(len(ids), True, timedelta(0))
 
 
 def run_due_jobs(
@@ -234,7 +275,7 @@ def _in_range(text: str, name: str, low: float, high: float) -> float:
     return value
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, clock: Clock = utc_now) -> int:
     parser = argparse.ArgumentParser(prog="sky_server.admin")
     sub = parser.add_subparsers(dest="command", required=True)
     create = sub.add_parser("create-user", help="撮影者を作り、招待コードを1回だけ表示する")
@@ -308,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"zone_id: {zone.zone_id}")
     elif args.command == "list-privacy-zones":
         for zone in user.privacy_zones:
-            print(f"{zone.zone_id} {zone.lat} {zone.lon} {zone.radius_m} {zone.label or '-'}")
+            print(f"{zone.zone_id}\t{zone.lat}\t{zone.lon}\t{zone.radius_m}\t{zone.label or '-'}")
     elif args.command == "delete-privacy-zone":
         if not delete_privacy_zone(repository, user, args.zone_id):
             print(f"プライバシーゾーンが見つかりません: {args.zone_id}", file=sys.stderr)
@@ -319,11 +360,11 @@ def main(argv: list[str] | None = None) -> int:
         repository.update_user(user.model_copy(update={"consent_public": public}))
         print(f"consent_public: {'true' if public else 'false'}")
     else:
-        return _delete_user(backend, user, args.yes)
+        return _delete_user(backend, user, args.yes, clock)
     return 0
 
 
-def _delete_user(backend: Backend, user: User, yes: bool) -> int:
+def _delete_user(backend: Backend, user: User, yes: bool, clock: Clock) -> int:
     count = len(backend.repository.list_observations_by_user(user.user_id))
     if not yes:
         print(
@@ -333,12 +374,13 @@ def _delete_user(backend: Backend, user: User, yes: bool) -> int:
         )
         return 1
     try:
-        deleted = delete_user_data(
+        result = delete_user_data(
             user.user_id,
             backend.repository,
             backend.blob_store,
             backend.weather_store,
             backend.job_repository,
+            clock,
         )
     except Exception as e:
         print(
@@ -346,7 +388,15 @@ def _delete_user(backend: Backend, user: User, yes: bool) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"撮影者 {user.user_id} を消しました（消した観測: {deleted} 件）")
+    if not result.finished:
+        minutes = math.ceil(result.remaining.total_seconds() / 60)
+        print(
+            f"撮影者 {user.user_id} を無効にして、観測 {result.observation_count} 件のデータを"
+            f"消しました。撮影者はまだ残っています。あと {minutes} 分以上おいて、"
+            "もう一度実行してください"
+        )
+        return 0
+    print(f"撮影者 {user.user_id} を消しました（消した観測: {result.observation_count} 件）")
     return 0
 
 

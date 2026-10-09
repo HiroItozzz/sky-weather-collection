@@ -212,6 +212,49 @@ def test_gcs_消せてないキーを消してもエラーにならない():
     assert weather.get("k") == b"y"
 
 
+def test_gcs_接頭辞の下だけを消し別の接頭辞や前方一致は残る():
+    client = FakeStorageClient()
+    images = GcsBlobStore("bucket", "images/", client)
+    weather = GcsBlobStore("bucket", "weather/", client)
+    for key in ("ab/1.jpg", "ab/2.jpg", "abc/1.jpg", "ab.jpg"):
+        images.put(key, b"x")
+    weather.put("ab/1.jpg", b"y")
+    images.delete_prefix("ab/")
+    images.delete_prefix("ab/")
+    assert sorted(client.buckets["bucket"]) == [
+        "images/ab.jpg",
+        "images/abc/1.jpg",
+        "weather/ab/1.jpg",
+    ]
+
+
+@pytest.mark.parametrize("prefix", ["", "/", "ab"])
+def test_gcs_接頭辞がスラッシュで終わっていなければエラー(prefix):
+    store = GcsBlobStore("bucket", "images/", FakeStorageClient())
+    with pytest.raises(ValueError):
+        store.delete_prefix(prefix)
+
+
+def test_ローカル_接頭辞の下だけを消し前方一致は残る(tmp_path):
+    store = LocalBlobStore(tmp_path)
+    for key in ("ab/1.jpg", "ab/2.jpg", "abc/1.jpg", "ab.jpg"):
+        store.put(key, b"x")
+    store.delete_prefix("ab/")
+    store.delete_prefix("ab/")
+    assert [store.get(k) for k in ("ab/1.jpg", "ab/2.jpg")] == [None, None]
+    assert store.get("abc/1.jpg") == b"x"
+    assert store.get("ab.jpg") == b"x"
+
+
+@pytest.mark.parametrize("prefix", ["", "/", "ab", "../", "../images/"])
+def test_ローカル_不正な接頭辞はエラーで何も消さない(tmp_path, prefix):
+    store = LocalBlobStore(tmp_path)
+    store.put("ab/1.jpg", b"x")
+    with pytest.raises(ValueError):
+        store.delete_prefix(prefix)
+    assert store.get("ab/1.jpg") == b"x"
+
+
 # Cloud Tasks
 
 

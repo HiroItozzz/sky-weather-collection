@@ -170,6 +170,95 @@ def test_取得に失敗した直後の60秒以内は取りに行かない():
     assert fetch.calls == 2
 
 
+HOUR = 3600.0
+DAY = 24 * HOUR
+
+
+def test_取得に失敗しても24時間以内の古い鍵で検証が通る():
+    fetch = FakeFetch()
+    clock = FakeTime()
+    verifier = make_verifier(fetch, clock)
+    verifier(make_token(), AUDIENCE)
+    # 1時間たって取り直しになるが、取得に失敗する
+    clock.now += HOUR
+    fetch.error = ConnectionError("down")
+    assert verifier(make_token(), AUDIENCE)["email"] == EMAIL
+    assert fetch.calls == 2
+
+
+def test_間隔の下限の内側でも24時間以内の古い鍵で検証が通る():
+    fetch = FakeFetch()
+    clock = FakeTime()
+    verifier = make_verifier(fetch, clock)
+    verifier(make_token(), AUDIENCE)
+    clock.now += HOUR
+    fetch.error = ConnectionError("down")
+    verifier(make_token(), AUDIENCE)
+    # 失敗の直後（60 秒の内側）は取りに行かず、古い鍵を使う
+    clock.now += 30
+    assert verifier(make_token(), AUDIENCE)["email"] == EMAIL
+    assert fetch.calls == 2
+
+
+def test_取得に失敗しても古い鍵に入っていないkidは通らない():
+    fetch = FakeFetch()
+    clock = FakeTime()
+    verifier = make_verifier(fetch, clock)
+    verifier(make_token(), AUDIENCE)
+    clock.now += HOUR
+    fetch.error = ConnectionError("down")
+    with pytest.raises(ValueError):
+        verifier(make_token(OTHER_KEY, kid="k2"), AUDIENCE)
+
+
+def test_取得に失敗して古い鍵を使ったことはログに出る(caplog):
+    fetch = FakeFetch()
+    clock = FakeTime()
+    verifier = make_verifier(fetch, clock)
+    verifier(make_token(), AUDIENCE)
+    clock.now += HOUR
+    fetch.error = ConnectionError("down")
+    verifier(make_token(), AUDIENCE)
+    assert "古い公開鍵を使います" in caplog.text
+
+
+def test_最後の取得から24時間を超えた古い鍵では失敗する():
+    fetch = FakeFetch()
+    clock = FakeTime()
+    verifier = make_verifier(fetch, clock)
+    verifier(make_token(), AUDIENCE)
+    fetch.error = ConnectionError("down")
+    # ちょうど 24 時間までは使える
+    clock.now += DAY
+    assert verifier(make_token(), AUDIENCE)["email"] == EMAIL
+    # 24 時間を超えたら、取得に失敗した場合は使えない
+    clock.now += 61
+    with pytest.raises(ConnectionError):
+        verifier(make_token(), AUDIENCE)
+    # 間隔の下限の内側でも使えない
+    clock.now += 10
+    with pytest.raises(ValueError):
+        verifier(make_token(), AUDIENCE)
+    assert_denied(make_token(), FakeFetch(error=ConnectionError("down")))
+
+
+def test_古い鍵を使っても60秒に1回の制限は変わらない():
+    fetch = FakeFetch()
+    clock = FakeTime()
+    verifier = make_verifier(fetch, clock)
+    verifier(make_token(), AUDIENCE)
+    clock.now += HOUR
+    fetch.error = ConnectionError("down")
+    for _ in range(3):
+        verifier(make_token(), AUDIENCE)
+    assert fetch.calls == 2
+    # 60 秒たてば、また取りに行く
+    clock.now += 60
+    fetch.error = None
+    verifier(make_token(), AUDIENCE)
+    assert fetch.calls == 3
+
+
 @pytest.mark.parametrize("token", ["abc", "a.b", "a.b.c.d"])
 def test_3つの部分でないトークンは取得関数を呼ばずに401(token):
     fetch = FakeFetch()

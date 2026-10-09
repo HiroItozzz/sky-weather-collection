@@ -40,7 +40,9 @@ uv run python -m sky_server.admin delete-user --user-id <user_id>
 uv run python -m sky_server.admin delete-user --user-id <user_id> --yes
 ```
 
-`delete-user` が途中で失敗したときは、もう一度実行すれば残りを消せる。
+`delete-user --yes` は2段階で消す（`docs/server-security.md` 7.3節）。1回目で撮影者を無効にして観測・画像・天気データ・ジョブを消し、撮影者そのものは残す。実行中だった天気ジョブがあとから書き戻すことがあるので、10分以上おいてもう一度実行すると、残りを消してから撮影者を消す。途中で失敗したときも、もう一度実行すれば残りを消せる。
+
+観測の記録より前に失敗したアップロードの画像など、撮影者からたどれない残骸は消えずに残ることがある。
 
 ### 送信の上限と検査
 

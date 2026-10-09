@@ -212,6 +212,16 @@ gcloud run services logs read $SERVICE --region=$REGION --limit=50
 
 ジョブの状態は、Cloud Console の Firestore の画面で `weather_jobs` コレクションを開くと見られる。`forecast` が `done` になっていることを確かめ、3時間30分後に `label` も `done` になり、`weather/raw/amedas/` に封筒ができていることを確かめる（`docs/m4-weather.md` 9節）。
 
+### 撮影者のデータを消す
+
+データの削除を頼まれたときは、手元の PC から（撮影者の作成と同じ環境変数を付けて）`delete-user` を実行する。
+
+```sh
+uv run python -m sky_server.admin delete-user --user-id <user_id> --yes
+# 10分以上おいて、もう一度実行する（実行中だった天気ジョブの書き戻しも消して、撮影者を消す）
+uv run python -m sky_server.admin delete-user --user-id <user_id> --yes
+```
+
 ## 7. 更新
 
 コードを変えたら、5節の `gcloud run deploy` を同じ引数でもう一度実行する（環境変数は前回の値が残るので、`--set-env-vars` は省いてもよい）。
