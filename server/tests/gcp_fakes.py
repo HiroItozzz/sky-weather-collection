@@ -84,6 +84,10 @@ class FakeBlob:
         self._objects = objects
         self._name = name
 
+    @property
+    def name(self) -> str:
+        return self._name
+
     def upload_from_string(self, data: bytes) -> None:
         self._objects[self._name] = data
 
@@ -104,6 +108,9 @@ class FakeBucket:
 
     def blob(self, name: str) -> FakeBlob:
         return FakeBlob(self._objects, name)
+
+    def list_blobs(self, prefix: str = "") -> list[FakeBlob]:
+        return [FakeBlob(self._objects, name) for name in self._objects if name.startswith(prefix)]
 
 
 class FakeStorageClient:

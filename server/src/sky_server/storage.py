@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -68,6 +69,13 @@ class BlobStore(ABC):
     @abstractmethod
     def delete(self, key: str) -> None:
         """消す。なければ何もしない。"""
+
+    @abstractmethod
+    def delete_prefix(self, prefix: str) -> None:
+        """接頭辞の下にあるものをすべて消す。なければ何もしない。
+
+        `prefix` は `/` で終わる形で渡す（`ab` で `abc/` まで消えないように）。
+        """
 
 
 class LocalObservationRepository(ObservationRepository):
@@ -161,6 +169,19 @@ class LocalBlobStore(BlobStore):
 
     def delete(self, key: str) -> None:
         (self._root / key).unlink(missing_ok=True)
+
+    def delete_prefix(self, prefix: str) -> None:
+        check_prefix(prefix)
+        directory = (self._root / prefix).resolve()
+        if not directory.is_relative_to(self._root.resolve()) or directory == self._root.resolve():
+            raise ValueError(f"保存先の外や全体は消せません: {prefix!r}")
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def check_prefix(prefix: str) -> None:
+    """接頭辞が `/` で終わり、空でないことを確かめる。違えば ValueError。"""
+    if not prefix.endswith("/") or prefix.strip("/") == "":
+        raise ValueError(f"接頭辞は空でない、/ で終わる形にしてください: {prefix!r}")
 
 
 def _create_exclusive(path: Path, data: bytes) -> bool:

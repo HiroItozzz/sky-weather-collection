@@ -17,6 +17,8 @@ CERTS_URL = "https://www.googleapis.com/oauth2/v1/certs"
 CERTS_TTL_S = 3600.0
 # 公開鍵を取りに行く間隔の下限（秒）。知らない kid を並べて送られても通信が増えないようにする
 CERTS_MIN_INTERVAL_S = 60.0
+# 取得に失敗したときなどに、古い公開鍵を使い続けてよい時間（秒）。最後に取得できてからの長さ
+CERTS_STALE_TTL_S = 24 * 3600.0
 # 時計のずれとして許す秒数
 CLOCK_SKEW_S = 10
 ISSUERS = ("accounts.google.com", "https://accounts.google.com")
@@ -42,7 +44,11 @@ def fetch_google_certs() -> dict[str, str]:
 
 
 class CertsCache:
-    """公開鍵のキャッシュ。1時間で取り直し、知らない kid での取り直しは 60 秒に1回まで。"""
+    """公開鍵のキャッシュ。1時間で取り直し、知らない kid での取り直しは 60 秒に1回まで。
+
+    取り直しに失敗したときや、間隔の下限の内側で取りに行けないときは、最後に取得できてから
+    24 時間以内の古い公開鍵があればそれを使う（stale-if-error）。
+    """
 
     def __init__(
         self,
@@ -71,11 +77,24 @@ class CertsCache:
                 )
                 if not recent:
                     self._last_attempt = now
-                    self._certs = self._fetch()
-                    self._fetched_at = now
-                elif expired:
+                    try:
+                        self._certs = self._fetch()
+                        self._fetched_at = now
+                    except Exception as e:
+                        if not self._usable_stale(now):
+                            raise
+                        logger.warning(
+                            "公開鍵の取得に失敗したため、古い公開鍵を使います: %s: %s",
+                            type(e).__name__,
+                            e,
+                        )
+                elif expired and not self._usable_stale(now):
                     raise ValueError("公開鍵が古く、取り直しも間隔の下限の内側のため使えません")
             return self._certs
+
+    def _usable_stale(self, now: float) -> bool:
+        """最後に取得できてから 24 時間以内の古い公開鍵があるか。"""
+        return self._certs is not None and now - self._fetched_at <= CERTS_STALE_TTL_S
 
 
 class GoogleTokenVerifier:

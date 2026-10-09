@@ -11,7 +11,8 @@ import httpx
 from sky_server.storage import BlobStore
 
 USER_AGENT = "sky-weather-collection/0.1 (+https://github.com/hiroitozzz/sky-weather-collection)"
-TIMEOUT_S = 20.0
+# 接続、1回の読み取り、書き込み、接続の取得のそれぞれの上限（秒）。呼び出し全体の期限は DEADLINE_S
+TIMEOUT_S = 5.0
 # 外部 API の応答の大きさの上限。これを超えたら読むのをやめる
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 # 1回の呼び出し全体（接続から本文を読み終えるまで）の期限。接続や1回の読み取りごとではない
@@ -38,8 +39,14 @@ class PermanentError(Exception):
 
 
 def create_client() -> httpx.Client:
-    """User-Agent とタイムアウトを設定した HTTP クライアントを作る。"""
-    return httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT_S)
+    """User-Agent、Accept-Encoding、タイムアウトを設定した HTTP クライアントを作る。
+
+    小さな圧縮データが展開すると巨大になる攻撃に備え、圧縮していない応答を求める。
+    """
+    return httpx.Client(
+        headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"},
+        timeout=httpx.Timeout(TIMEOUT_S),
+    )
 
 
 def round_coord(value: float) -> str:

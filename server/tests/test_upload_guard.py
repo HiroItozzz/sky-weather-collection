@@ -7,9 +7,10 @@ from fastapi.testclient import TestClient
 from sky_server.admin import create_user
 from sky_server.main import create_app
 from sky_server.storage import LocalObservationRepository
-from sky_server.upload_guard import MAX_UPLOAD_BYTES, UploadGuard
+from sky_server.upload_guard import MAX_INTERNAL_BYTES, MAX_UPLOAD_BYTES, UploadGuard
 
 PATH = f"/v1/observations/{OBSERVATION_ID}"
+INTERNAL_PATH = "/internal/tasks/fetch-weather"
 
 
 class Recorder:
@@ -202,7 +203,7 @@ def test_PUT以外とアップロード以外のパスには効かない(api):
     assert r.status == 200
     r = Recorder(guard, [], [b"x"], path="/v1/other").run()
     assert r.status == 200
-    r = Recorder(guard, [], [b"x"], path="/internal/tasks/fetch-weather", method="POST").run()
+    r = Recorder(guard, [], [b"x"], path=INTERNAL_PATH, method="GET").run()
     assert r.status == 200
     r = Recorder(guard, [], [b"x"], path=f"{PATH}/extra").run()
     assert r.status == 200
@@ -243,3 +244,78 @@ def test_Content_Lengthのない分割送信でも認証済みなら通る(api, 
     res = api.client.put(PATH, headers={"Authorization": f"Bearer {token}"}, content=body())
     # multipart として不正なので 4xx だが、ミドルウェアが断った 401/413 ではない
     assert res.status_code not in (401, 411, 413)
+
+
+def internal(app, headers, chunks) -> Recorder:
+    return Recorder(app, headers, chunks, path=INTERNAL_PATH, method="POST").run()
+
+
+def test_内部APIは認証なしで4KBちょうどの本文が通る(api):
+    inner, guard = guarded(api)
+    assert MAX_INTERNAL_BYTES == 4 * 1024
+    r = internal(guard, [length(MAX_INTERNAL_BYTES)], [b"x" * MAX_INTERNAL_BYTES])
+    assert r.status == 200
+    assert inner.read == MAX_INTERNAL_BYTES
+    # 認証はミドルウェアでは行わないので、撮影者は入らない
+    assert "user" not in (inner.state or {})
+
+
+def test_内部APIはContent_Lengthが4KBを超えていれば本文を読まずに413(api):
+    inner, guard = guarded(api)
+    r = internal(guard, [length(MAX_INTERNAL_BYTES + 1)], [b"x"])
+    assert r.status == 413
+    assert r.detail == "リクエストが大きすぎます"
+    assert r.receive_calls == 0
+    assert not inner.called
+
+
+def test_内部APIは本文が4KBより1バイト多ければ413(api):
+    inner, guard = guarded(api)
+    r = internal(guard, [], [b"x" * MAX_INTERNAL_BYTES, b"x"])
+    assert r.status == 413
+    assert inner.read == MAX_INTERNAL_BYTES
+
+
+def test_内部APIはContent_Lengthを小さく偽って大きく送ると413(api):
+    inner, guard = guarded(api)
+    chunks = [b"x" * 1024] * 8
+    r = internal(guard, [length(10)], chunks)
+    assert r.status == 413
+    # 超えた時点で読むのをやめる
+    assert r.receive_calls == 5
+    assert inner.read <= MAX_INTERNAL_BYTES
+
+
+def test_内部APIはContent_Lengthが数字でなければ400(api):
+    inner, guard = guarded(api)
+    for value in (b"abc", b"-1", b"1.5", b""):
+        r = internal(guard, [(b"content-length", value)], [b"x"])
+        assert r.status == 400
+    assert not inner.called
+
+
+def test_内部APIの大きな本文はOIDCの検証より前に断られる(data_dir, monkeypatch):
+    calls = []
+
+    def verify(request):
+        calls.append(request)
+
+    app = create_app(data_dir, task_auth=verify)
+    body = b'{"job_id": "' + b"x" * MAX_INTERNAL_BYTES + b'"}'
+    # Content-Length が正しい場合
+    r = internal(app, [length(len(body))], [body])
+    assert r.status == 413
+    # Content-Length を偽った場合
+    r = internal(app, [length(10)], [body[i : i + 1024] for i in range(0, len(body), 1024)])
+    assert r.status == 413
+    assert calls == []
+
+
+def test_内部APIの小さな本文は検証に進む(data_dir):
+    calls = []
+    app = create_app(data_dir, task_auth=calls.append)
+    body = json.dumps({"job_id": f"{OBSERVATION_ID}_forecast"}).encode()
+    headers = [length(len(body)), (b"content-type", b"application/json")]
+    r = Recorder(app, headers, [body], path=INTERNAL_PATH, method="POST", query_string=b"").run()
+    assert r.status == 200
+    assert len(calls) == 1

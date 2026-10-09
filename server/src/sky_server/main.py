@@ -1,6 +1,7 @@
 """アップロード API（M1：ローカル版）。"""
 
 import hashlib
+import logging
 import math
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -26,6 +27,8 @@ from sky_server.models import UUID_PATTERN, ObservationMetadata, User
 from sky_server.storage import BlobStore, ObservationRepository
 from sky_server.task_auth import TaskAuthenticator, get_task_authenticator
 from sky_server.upload_guard import UploadGuard
+
+logger = logging.getLogger(__name__)
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 JPEG_MAGIC = b"\xff\xd8\xff"
@@ -170,8 +173,12 @@ def create_app(
             if existing is None:
                 raise HTTPException(500, "保存に失敗しました")
             return exists_response(existing, user, meta)
-        repository.increment_daily_count(user.user_id, day)
         reserve_weather_jobs(record)
+        # 件数の数え漏れは許容する。増加に失敗しても、作成済みの観測には 201 を返す
+        try:
+            repository.increment_daily_count(user.user_id, day)
+        except Exception:
+            logger.exception("1日の件数の増加に失敗しました（user_id=%s）", user.user_id)
         return JSONResponse({"observation_id": observation_id, "status": "created"}, 201)
 
     @app.get("/v1/observations/{observation_id}")

@@ -2,6 +2,8 @@
 
 FastAPI は依存（認証）を解決する前に multipart の本文をすべて読むので、
 `PUT /v1/observations/{id}` に限って、大きさ → 認証 → 本文の数え上げ、の順に検査する。
+`POST /internal/tasks/fetch-weather` も JSON の本文をすべて読まれてしまうので、
+こちらは大きさと本文の数え上げだけを行う（認証はアプリの OIDC の検証に任せる）。
 """
 
 import json
@@ -18,6 +20,10 @@ MAX_UPLOAD_BYTES = 11 * 1024 * 1024
 
 UPLOAD_PATH = re.compile(r"^/v1/observations/[^/]+$")
 
+# 内部 API（Cloud Tasks からの呼び出し）の本文の上限。本文は job_id だけの小さな JSON
+INTERNAL_TASK_PATH = "/internal/tasks/fetch-weather"
+MAX_INTERNAL_BYTES = 4 * 1024
+
 
 class UploadGuard:
     def __init__(self, app: ASGIApp, repository: ObservationRepository) -> None:
@@ -25,11 +31,16 @@ class UploadGuard:
         self.repository = repository
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if (
-            scope["type"] != "http"
-            or scope["method"] != "PUT"
-            or not UPLOAD_PATH.match(scope["path"])
-        ):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if scope["method"] == "PUT" and UPLOAD_PATH.match(scope["path"]):
+            limit = MAX_UPLOAD_BYTES
+            authenticate = True
+        elif scope["method"] == "POST" and scope["path"] == INTERNAL_TASK_PATH:
+            limit = MAX_INTERNAL_BYTES
+            authenticate = False
+        else:
             await self.app(scope, receive, send)
             return
 
@@ -42,18 +53,19 @@ class UploadGuard:
             if not (text.isascii() and text.isdigit()):
                 await _respond(send, 400, "Content-Length が正しくありません")
                 return
-            if int(text) > MAX_UPLOAD_BYTES:
+            if int(text) > limit:
                 await _respond(send, 413, "リクエストが大きすぎます")
                 return
         # Content-Length がないときも受け付ける。認証を先に通し、本文は手順 3 で数える
 
-        # 2. 認証
-        user = await self._authenticate(headers.get(b"authorization", b"").decode("latin-1"))
-        if user is None:
-            await _respond(send, 401, "認証に失敗しました", {"WWW-Authenticate": "Bearer"})
-            return
-        # state はリクエストをまたいで共有されることがあるので、書き換えずに新しい dict にする
-        scope["state"] = {**scope.get("state", {}), "user": user}
+        # 2. 認証（内部 API はアプリの OIDC の検証に任せる）
+        if authenticate:
+            user = await self._authenticate(headers.get(b"authorization", b"").decode("latin-1"))
+            if user is None:
+                await _respond(send, 401, "認証に失敗しました", {"WWW-Authenticate": "Bearer"})
+                return
+            # state はリクエストをまたいで共有されることがあるので、書き換えずに新しい dict にする
+            scope["state"] = {**scope.get("state", {}), "user": user}
 
         # 3. 本文を数える。Content-Length を偽ったリクエストは、超えた時点で読むのをやめる
         received = 0
@@ -67,7 +79,7 @@ class UploadGuard:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > MAX_UPLOAD_BYTES:
+                if received > limit:
                     too_large = True
                     return {"type": "http.disconnect"}
             return message

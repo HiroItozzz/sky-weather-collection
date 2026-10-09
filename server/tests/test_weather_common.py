@@ -61,10 +61,33 @@ def test_切り上げは日付をまたぐ():
     assert ceil_15min(t) == datetime(2026, 10, 10, 0, 0, tzinfo=UTC)
 
 
-def test_クライアントにUser_Agentとタイムアウトが設定される():
+def test_クライアントにUser_Agentと圧縮なしの指定とタイムアウトが設定される():
     with create_client() as client:
         assert client.headers["User-Agent"].startswith("sky-weather-collection/0.1 ")
-        assert client.timeout.read == 20.0
+        assert client.headers["Accept-Encoding"] == "identity"
+        assert client.timeout == httpx.Timeout(5.0)
+        assert client.timeout.connect == 5.0
+        assert client.timeout.read == 5.0
+        assert client.timeout.write == 5.0
+        assert client.timeout.pool == 5.0
+
+
+def test_送られるリクエストにAccept_Encodingのidentityが付く(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers["Accept-Encoding"])
+        return httpx.Response(200, text="{}")
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    with create_client() as client:
+        client.get("https://example.test/")
+    assert seen == ["identity"]
 
 
 @pytest.mark.parametrize("status", [429, 500, 503])

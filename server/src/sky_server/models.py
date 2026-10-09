@@ -34,6 +34,9 @@ class User(BaseModel):
     revoked_at: datetime | None = None
     consent_public: bool = False
     privacy_zones: list[PrivacyZone] = []
+    # delete-user を始めた時刻と、そのとき消した観測の ID（2回目以降の削除で使う）
+    deletion_started_at: datetime | None = None
+    deletion_observation_ids: list[str] = []
 
 
 class _Strict(BaseModel):

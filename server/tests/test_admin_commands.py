@@ -1,7 +1,7 @@
 """プライバシーゾーン、公開への同意、撮影者の削除の管理コマンド（ローカル版と GCP 版）。"""
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from gcp_fakes import FakeFirestoreClient, FakeStorageClient, FakeTasksClient
@@ -59,8 +59,8 @@ def test_ゾーンを追加して一覧と削除ができる(backend, capsys):
 
     assert main(["list-privacy-zones", "--user-id", user_id]) == 0
     assert capsys.readouterr().out.splitlines() == [
-        f"{first} 35.68 139.76 300.0 -",
-        f"{second} -33.5 -70.25 50000.0 実家 の近く",
+        f"{first}\t35.68\t139.76\t300.0\t-",
+        f"{second}\t-33.5\t-70.25\t50000.0\t実家 の近く",
     ]
     zones = backend.repository.get_user(user_id).privacy_zones
     assert [z.zone_id for z in zones] == [first, second]
@@ -168,7 +168,7 @@ def test_同意を変えてもゾーンと無効化は残る(backend, capsys):
 
 def seed_observation(backend, user_id, observation_id, with_jobs=True) -> dict[str, str]:
     """観測1件と、画像・天気の生レスポンス・ジョブを作る。消えるべきものの保存先を返す。"""
-    image_key = f"{observation_id[:2]}/{observation_id}.jpg"
+    image_key = f"{observation_id}/{'0' * 64}.jpg"
     backend.blob_store.put(image_key, b"jpeg")
     backend.repository.add_observation(
         {"observation_id": observation_id, "user_id": user_id, "image_key": image_key}
@@ -210,9 +210,10 @@ def remains(backend, observation_id) -> list[str]:
         for provider in ("open_meteo", "amedas"):
             if backend.weather_store.get(raw_key(provider, observation_id, phase)):
                 found.append(f"raw_{provider}_{phase}")
-    image_key = f"{observation_id[:2]}/{observation_id}.jpg"
-    if backend.blob_store.get(image_key):
+    if backend.blob_store.get(f"{observation_id}/{'0' * 64}.jpg"):
         found.append("image")
+    if backend.blob_store.get(f"{observation_id}/{'1' * 64}.jpg"):
+        found.append("image_other")
     return found
 
 
@@ -246,24 +247,84 @@ def test_yesがなければ件数だけ表示して何も消さない(backend, c
     assert backend.repository.get_daily_count(alice, "20261009") == 1
 
 
-def test_yesで撮影者のデータがすべて消え他の撮影者は残る(backend, capsys):
+def delete_user(alice, at=NOW) -> int:
+    return main(["delete-user", "--user-id", alice, "--yes"], clock=lambda: at)
+
+
+def test_1回目は観測のデータを消して撮影者は残し無効にする(backend, capsys):
+    alice, bob = seed_two_users(backend)
+    assert delete_user(alice) == 0
+    out = capsys.readouterr().out
+    assert "もう一度実行してください" in out
+    assert "あと 10 分" in out
+
+    user = backend.repository.get_user(alice)
+    assert user.revoked_at == NOW
+    assert user.deletion_started_at == NOW
+    assert sorted(user.deletion_observation_ids) == [OBS_A1, OBS_A2]
+    assert remains(backend, OBS_A1) == []
+    assert remains(backend, OBS_A2) == []
+    assert backend.repository.get_daily_count(alice, "20261009") == 1
+    assert backend.repository.get_user(bob).revoked_at is None
+
+
+def test_10分たっていなければ撮影者を残して待ち時間を表示する(backend, capsys):
+    alice, _ = seed_two_users(backend)
+    delete_user(alice)
+    capsys.readouterr()
+    assert delete_user(alice, NOW + timedelta(minutes=9, seconds=30)) == 0
+    assert "あと 1 分" in capsys.readouterr().out
+    user = backend.repository.get_user(alice)
+    assert user is not None
+    assert user.deletion_started_at == NOW
+    assert backend.repository.get_daily_count(alice, "20261009") == 1
+
+
+def test_10分ちょうどで撮影者とusageが消え他の撮影者は残る(backend, capsys):
     alice, bob = seed_two_users(backend)
     before_bob = remains(backend, OBS_B1)
-    assert main(["delete-user", "--user-id", alice, "--yes"]) == 0
+    delete_user(alice)
+    capsys.readouterr()
+    assert delete_user(alice, NOW + timedelta(minutes=10)) == 0
     out = capsys.readouterr().out
     assert out.splitlines()[-1] == f"撮影者 {alice} を消しました（消した観測: 2 件）"
 
     assert backend.repository.get_user(alice) is None
-    assert remains(backend, OBS_A1) == []
-    assert remains(backend, OBS_A2) == []
     assert backend.repository.get_daily_count(alice, "20261009") == 0
     assert backend.repository.get_daily_count(alice, "20261010") == 0
-
     assert backend.repository.get_user(bob) is not None
     assert remains(backend, OBS_B1) == before_bob
     assert len(before_bob) == 8
     assert backend.repository.get_daily_count(bob, "20261009") == 1
     assert backend.repository.get_daily_count(bob, "20261010") == 1
+
+
+def test_1回目のあとに書き戻されたジョブと生レスポンスも2回目で消える(backend):
+    alice, _ = seed_two_users(backend)
+    delete_user(alice)
+    # 実行中のジョブが、観測が消えたあとに書き戻した
+    seed_observation(backend, alice, OBS_A1)
+    backend.repository.delete_observation(OBS_A1)
+    assert len(remains(backend, OBS_A1)) == 7
+
+    assert delete_user(alice, NOW + timedelta(minutes=10)) == 0
+    assert remains(backend, OBS_A1) == []
+    assert backend.repository.get_user(alice) is None
+
+
+def test_別のIDの前方一致では消えない(backend):
+    alice = new_user(backend)
+    other = OBS_A1[:-1] + "9"
+    seed_observation(backend, alice, OBS_A1)
+    bob = new_user(backend, "bob")
+    seed_observation(backend, bob, OBS_A1 + "0")
+    seed_observation(backend, bob, other)
+    # 同じ ID で別の画像が先に保存されていた（409 になった）
+    backend.blob_store.put(f"{OBS_A1}/{'1' * 64}.jpg", b"jpeg2")
+    delete_user(alice)
+    assert remains(backend, OBS_A1) == []
+    assert len(remains(backend, OBS_A1 + "0")) == 8
+    assert len(remains(backend, other)) == 8
 
 
 def test_ジョブのblob_keyが標準の場所でなくても消える(backend):
@@ -273,13 +334,15 @@ def test_ジョブのblob_keyが標準の場所でなくても消える(backend)
     job.providers["open_meteo"].blob_key = "raw/other/place.json.gz"
     backend.job_repository.update_job(job)
     backend.weather_store.put("raw/other/place.json.gz", b"raw")
-    assert main(["delete-user", "--user-id", alice, "--yes"]) == 0
+    assert delete_user(alice) == 0
     assert backend.weather_store.get("raw/other/place.json.gz") is None
 
 
-def test_観測のない撮影者も消せる(backend, capsys):
+def test_観測のない撮影者も10分後に消せる(backend, capsys):
     alice = new_user(backend)
-    assert main(["delete-user", "--user-id", alice, "--yes"]) == 0
+    assert delete_user(alice) == 0
+    assert backend.repository.get_user(alice) is not None
+    assert delete_user(alice, NOW + timedelta(minutes=10)) == 0
     assert "消した観測: 0 件" in capsys.readouterr().out
     assert backend.repository.get_user(alice) is None
 
@@ -294,28 +357,39 @@ def test_見つからない撮影者の削除は終了コード1(backend, capsys
 def test_途中で失敗してももう一度実行すれば残りを消せる(backend, monkeypatch, capsys):
     alice, bob = seed_two_users(backend)
     store_class = type(backend.weather_store)
-    original = store_class.delete
+    original = store_class.delete_prefix
     calls = []
 
-    def flaky(self, key):
-        calls.append(key)
-        if len(calls) == 10:
+    def flaky(self, prefix):
+        calls.append(prefix)
+        if len(calls) == 3:
             raise ConnectionError("通信できません")
-        original(self, key)
+        original(self, prefix)
 
-    monkeypatch.setattr(store_class, "delete", flaky)
-    assert main(["delete-user", "--user-id", alice, "--yes"]) == 1
+    monkeypatch.setattr(store_class, "delete_prefix", flaky)
+    assert delete_user(alice) == 1
     assert "ConnectionError" in capsys.readouterr().err
     # 撮影者は最後に消すので、失敗したあとも残っている
-    assert backend.repository.get_user(alice) is not None
+    user = backend.repository.get_user(alice)
+    assert user is not None
+    assert sorted(user.deletion_observation_ids) == [OBS_A1, OBS_A2]
     assert len(remains(backend, OBS_A1) + remains(backend, OBS_A2)) > 0
 
-    monkeypatch.setattr(store_class, "delete", original)
-    assert main(["delete-user", "--user-id", alice, "--yes"]) == 0
+    monkeypatch.setattr(store_class, "delete_prefix", original)
+    assert delete_user(alice, NOW + timedelta(minutes=10)) == 0
     assert backend.repository.get_user(alice) is None
     assert remains(backend, OBS_A1) == remains(backend, OBS_A2) == []
     assert backend.repository.get_daily_count(alice, "20261009") == 0
     assert len(remains(backend, OBS_B1)) == 8
+
+
+def test_観測の記録が先に消えていても記録したIDで続きを消せる(backend):
+    alice, _ = seed_two_users(backend)
+    delete_user(alice)
+    # 2回目の前に、観測の記録だけが消えて生レスポンスが残った状態
+    backend.weather_store.put(raw_key("amedas", OBS_A1, "label"), b"raw")
+    assert delete_user(alice, NOW + timedelta(minutes=11)) == 0
+    assert remains(backend, OBS_A1) == []
 
 
 def test_消す順番は観測の記録と撮影者が最後(backend, monkeypatch):
@@ -329,7 +403,21 @@ def test_消す順番は観測の記録と撮影者が最後(backend, monkeypatc
     ]:
         monkeypatch.setattr(obj, name, _recording(getattr(obj, name), name, order))
     admin.delete_user_data(
-        alice, backend.repository, backend.blob_store, backend.weather_store, backend.job_repository
+        alice,
+        backend.repository,
+        backend.blob_store,
+        backend.weather_store,
+        backend.job_repository,
+        lambda: NOW,
+    )
+    order.clear()
+    admin.delete_user_data(
+        alice,
+        backend.repository,
+        backend.blob_store,
+        backend.weather_store,
+        backend.job_repository,
+        lambda: NOW + timedelta(minutes=10),
     )
     assert order[-2:] == ["delete_daily_counts", "delete_user"]
     # 観測ごとに、ジョブを消してから観測の記録を消す

@@ -30,13 +30,24 @@ def get_open_meteo_url() -> str:
 DEFAULT_DAILY_UPLOAD_LIMIT = 100
 
 
-def get_daily_upload_limit() -> int:
-    """撮影者ごとの1日（UTC）の新規の観測の上限。"""
-    return int(os.environ.get("SKY_DAILY_UPLOAD_LIMIT", DEFAULT_DAILY_UPLOAD_LIMIT))
-
-
 class ConfigError(ValueError):
     """設定の値が正しくない、または必須の設定が足りないときのエラー。"""
+
+
+def get_daily_upload_limit() -> int:
+    """撮影者ごとの1日（UTC）の新規の観測の上限。1以上の整数でなければエラー。"""
+    text = os.environ.get("SKY_DAILY_UPLOAD_LIMIT")
+    if text is None:
+        return DEFAULT_DAILY_UPLOAD_LIMIT
+    try:
+        limit = int(text)
+    except ValueError:
+        limit = 0
+    if limit < 1:
+        raise ConfigError(
+            f"SKY_DAILY_UPLOAD_LIMIT の値が正しくありません: {text!r}（1以上の整数にしてください）"
+        )
+    return limit
 
 
 BACKENDS = ("local", "gcp")

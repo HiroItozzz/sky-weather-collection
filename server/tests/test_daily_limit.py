@@ -5,8 +5,9 @@ import pytest
 from conftest import IMAGE, Api, make_metadata
 from fastapi.testclient import TestClient
 
+from sky_server.jobs import LocalJobRepository, LocalTaskScheduler
 from sky_server.main import create_app
-from sky_server.storage import LocalObservationRepository
+from sky_server.storage import LocalBlobStore, LocalObservationRepository
 
 DAY = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
 LIMIT = 3
@@ -129,3 +130,64 @@ def test_ローカルの件数は記録がなければ0でusageに保存され�
         "day": "20261009",
         "count": 2,
     }
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "abc", ""])
+def test_上限が1以上の整数でなければConfigError(monkeypatch, value):
+    from sky_server.config import ConfigError, get_daily_upload_limit
+
+    monkeypatch.setenv("SKY_DAILY_UPLOAD_LIMIT", value)
+    with pytest.raises(ConfigError, match="SKY_DAILY_UPLOAD_LIMIT"):
+        get_daily_upload_limit()
+
+
+def test_上限が1なら使える(monkeypatch):
+    from sky_server.config import get_daily_upload_limit
+
+    monkeypatch.setenv("SKY_DAILY_UPLOAD_LIMIT", "1")
+    assert get_daily_upload_limit() == 1
+
+
+def test_上限が不正ならアプリの起動時にConfigError(data_dir, monkeypatch):
+    from sky_server.config import ConfigError
+
+    monkeypatch.setenv("SKY_DAILY_UPLOAD_LIMIT", "0")
+    with pytest.raises(ConfigError):
+        create_app(data_dir)
+
+
+def test_件数の増加が例外を投げても201でジョブが予約される(data_dir, monkeypatch, clock, caplog):
+    class BrokenCountRepository(LocalObservationRepository):
+        def increment_daily_count(self, user_id, day):
+            raise RuntimeError("firestore down")
+
+    monkeypatch.setenv("SKY_DAILY_UPLOAD_LIMIT", str(LIMIT))
+    repository = BrokenCountRepository(data_dir)
+    api = Api(TestClient(create_app(data_dir, repository=repository, clock=clock)), repository)
+    _, token = api.new_user()
+    assert put_new(api, token, 0).status_code == 201
+    assert repository.get_observation(new_id(0)) is not None
+    assert LocalJobRepository(data_dir).get_job(f"{new_id(0)}_forecast") is not None
+    assert "1日の件数の増加に失敗しました" in caplog.text
+
+
+def test_天気ジョブの予約に失敗したら件数は増やさず503(data_dir, monkeypatch, clock):
+    class BrokenScheduler(LocalTaskScheduler):
+        def schedule(self, job_id, run_at):
+            raise RuntimeError("tasks down")
+
+    monkeypatch.setenv("SKY_DAILY_UPLOAD_LIMIT", str(LIMIT))
+    repository = LocalObservationRepository(data_dir)
+    app = create_app(
+        data_dir,
+        repository=repository,
+        job_repository=LocalJobRepository(data_dir),
+        blob_store=LocalBlobStore(data_dir),
+        scheduler=BrokenScheduler(data_dir),
+        runner=object(),
+        clock=clock,
+    )
+    api = Api(TestClient(app), repository)
+    user_id, token = api.new_user()
+    assert put_new(api, token, 0).status_code == 503
+    assert repository.get_daily_count(user_id, "20261009") == 0
