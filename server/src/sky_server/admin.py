@@ -1,4 +1,4 @@
-"""管理用コマンド：撮影者の作成・無効化・削除、プライバシーゾーンと公開への同意、天気ジョブの実行。"""
+"""管理用コマンド：撮影者の作成・無効化・削除、プライバシーゾーンと公開への同意、天気ジョブの実行、要約の作り直し。"""
 
 import argparse
 import math
@@ -15,9 +15,12 @@ from sky_server.jobs import (
     JobRepository,
     JobRunner,
     LocalTaskScheduler,
+    Summarizer,
+    _parse_time,
     default_fetchers,
+    save_summary,
 )
-from sky_server.models import PrivacyZone, User
+from sky_server.models import PrivacyZone, User, to_utc_millis
 from sky_server.storage import BlobStore, ObservationRepository
 from sky_server.weather.common import Clock, utc_now
 
@@ -207,6 +210,59 @@ def run_due_jobs(
     return 1 if failed else 0
 
 
+def rebuild_summaries(
+    repository: ObservationRepository,
+    job_repository: JobRepository,
+    summarizer: Summarizer,
+) -> tuple[int, int]:
+    """すべての観測の `captured_at_utc` と `label_done` を補い、完了したジョブの要約を計算し直す。
+
+    1件の失敗で止めず、`(処理した観測の数, 失敗した観測の数)` を返す。
+    要約の計算や観測への書き込みに失敗したジョブには、何も書かない（前の要約を残す）。
+    先に観測の ID をすべて読んでから1件ずつ処理するので、処理の途中で観測が増えても減っても
+    止まらない（増えた分はこの回では処理せず、消えた分は数えない）。
+    """
+    processed = failed = 0
+    for observation_id in repository.list_all_observation_ids():
+        record = repository.get_observation(observation_id)
+        if record is None:
+            continue
+        processed += 1
+        try:
+            if "captured_at_utc" not in record:
+                captured_at_utc = to_utc_millis(_parse_time(record["captured_at"]))
+                repository.update_observation_fields(
+                    observation_id, {"captured_at_utc": captured_at_utc}
+                )
+            ok = True
+            label_finished = False
+            for phase in PHASES:
+                job = job_repository.get_job(f"{observation_id}_{phase}")
+                if job is None:
+                    continue
+                if phase == "label" and job.status in ("done", "failed", "skipped"):
+                    label_finished = True
+                if job.status not in ("done", "failed"):
+                    continue
+                # save_summary は失敗しても例外を投げないので、成功したかを summary で見分ける。
+                # 失敗したときは、ジョブを保存しない（観測にも書かれていない）
+                save_summary(job, record, summarizer, repository)
+                if job.summary is None:
+                    ok = False
+                    continue
+                job_repository.update_job(job)
+            if label_finished and not record.get("label_done"):
+                repository.update_observation_fields(observation_id, {"label_done": True})
+        except Exception as e:
+            print(f"{observation_id} error {type(e).__name__}: {e}", file=sys.stderr)
+            failed += 1
+        else:
+            if not ok:
+                print(f"{observation_id} error 要約を作れませんでした", file=sys.stderr)
+                failed += 1
+    return processed, failed
+
+
 def _latitude(text: str) -> float:
     return _in_range(text, "lat", -90, 90)
 
@@ -259,6 +315,7 @@ def main(argv: list[str] | None = None, clock: Clock = utc_now) -> int:
     delete.add_argument("--user-id", required=True)
     delete.add_argument("--yes", action="store_true", help="確認なしで消す")
     sub.add_parser("run-due-jobs", help="期限の来た天気ジョブを実行する")
+    sub.add_parser("rebuild-summaries", help="天気の要約と撮影時刻（UTC）を作り直す")
     args = parser.parse_args(argv)
 
     try:
@@ -276,8 +333,17 @@ def main(argv: list[str] | None = None, clock: Clock = utc_now) -> int:
     if args.command == "run-due-jobs":
         scheduler = backend.scheduler
         fetchers = default_fetchers(backend.weather_store)
-        runner = JobRunner(repository, backend.job_repository, scheduler, fetchers)
+        summarizer = Summarizer(backend.weather_store)
+        runner = JobRunner(
+            repository, backend.job_repository, scheduler, fetchers, summarizer=summarizer
+        )
         return run_due_jobs(scheduler, runner, datetime.now(UTC))
+    if args.command == "rebuild-summaries":
+        processed, failed = rebuild_summaries(
+            repository, backend.job_repository, Summarizer(backend.weather_store)
+        )
+        print(f"処理した観測: {processed} 件、失敗: {failed} 件")
+        return 1 if failed else 0
     if args.command == "create-user":
         user, token = create_user(repository, args.name)
         print(f"user_id: {user.user_id}")

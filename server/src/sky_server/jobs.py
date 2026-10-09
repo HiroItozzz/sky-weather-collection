@@ -1,6 +1,7 @@
 """天気データの取得ジョブ：状態の保存、実行の予約、実行（M4：ローカル版）。"""
 
 import json
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -12,7 +13,14 @@ from pydantic import AwareDatetime, BaseModel
 from sky_server.config import get_amedas_enabled
 from sky_server.storage import BlobStore, ObservationRepository, _create_exclusive, _write_atomic
 from sky_server.weather.amedas import fetch_amedas
-from sky_server.weather.common import Clock, PermanentError, ceil_hour, create_client, utc_now
+from sky_server.weather.common import (
+    Clock,
+    PermanentError,
+    ceil_hour,
+    create_client,
+    load_envelope,
+    utc_now,
+)
 from sky_server.weather.open_meteo import fetch_open_meteo
 
 PHASES = ("forecast", "label")
@@ -32,6 +40,8 @@ MAX_ATTEMPTS = 6
 BASE_WAIT = timedelta(minutes=5)
 MAX_WAIT = timedelta(hours=2)
 LAST_ERROR_LIMIT = 1000
+
+logger = logging.getLogger(__name__)
 
 # 取得関数：observation_id, phase, captured_at, lat, lon, clock をキーワード引数で受け取り、
 # blob_key を返す
@@ -60,6 +70,8 @@ class WeatherJob(BaseModel):
     last_error: str | None = None
     completed_at: AwareDatetime | None = None
     skip_reason: str | None = None
+    # 完了したときの要約。forecast は {"weather_at_capture": ...}、label は {"answer": ...}
+    summary: dict | None = None
     providers: dict[str, ProviderState]
 
 
@@ -177,6 +189,19 @@ def _new_job(record: dict, phase: str, now: datetime) -> WeatherJob:
     return job
 
 
+def mark_label_done(job: WeatherJob, observations: ObservationRepository) -> None:
+    """`label` のジョブが終わったことを、観測の `label_done` に書く。
+
+    書き込みに失敗しても、ジョブの状態は変えずにログだけ出す。`label` 以外のジョブでは何もしない。
+    """
+    if job.phase != "label":
+        return
+    try:
+        observations.update_observation_fields(job.observation_id, {"label_done": True})
+    except Exception:
+        logger.exception("label_done を書けませんでした: %s", job.job_id)
+
+
 def _enqueue(job: WeatherJob, jobs: JobRepository, scheduler: TaskScheduler) -> None:
     """予約して、成功したら `enqueued` を true にして保存する。失敗したら例外をそのまま投げる。"""
     scheduler.schedule(job.job_id, job.next_attempt_at)
@@ -188,9 +213,13 @@ def ensure_weather_jobs(
     record: dict,
     jobs: JobRepository,
     scheduler: TaskScheduler,
+    observations: ObservationRepository,
     now: datetime | None = None,
 ) -> None:
     """観測の2つのジョブを用意し、予約できていないものを予約する。何度呼んでも結果は同じ。
+
+    作成時に `skipped` になった `label` のジョブは、観測に `label_done` を書く。
+    書けなくても、ログだけ出して続ける。
 
     予約に失敗したら例外を投げる（呼び出し側が 503 にする）。
     """
@@ -202,6 +231,10 @@ def ensure_weather_jobs(
         if not jobs.add_job(job):
             job = jobs.get_job(job.job_id)
         ensured.append(job)
+    for job in ensured:
+        # 再送のときも、前に書けなかった label_done を書き直す
+        if job.status == "skipped" and not record.get("label_done"):
+            mark_label_done(job, observations)
     for job in ensured:
         if job.status == "pending" and not job.enqueued:
             _enqueue(job, jobs, scheduler)
@@ -221,6 +254,49 @@ def default_fetchers(blob_store: BlobStore) -> dict[str, Fetcher]:
     return {"open_meteo": open_meteo, "amedas": amedas}
 
 
+class Summarizer:
+    """ジョブの封筒から要約を作る。封筒は `blob_key` から `weather_store` で読む。
+
+    計算は `sky_server.summary` の関数を呼ぶ。関数は呼ぶたびに読み込む（差し替えやすくするため）。
+    """
+
+    def __init__(self, weather_store: BlobStore) -> None:
+        self._weather_store = weather_store
+
+    def _envelope(self, job: WeatherJob, provider: str) -> dict | None:
+        state = job.providers.get(provider)
+        if state is None or state.blob_key is None:
+            return None
+        return load_envelope(self._weather_store, state.blob_key)
+
+    def __call__(self, job: WeatherJob, record: dict) -> dict:
+        """ジョブの要約を返す。失敗したら例外を投げる。"""
+        from sky_server.summary import answer, weather_at_capture
+
+        captured_at = _parse_time(record["captured_at"])
+        open_meteo = self._envelope(job, "open_meteo")
+        if job.phase == "forecast":
+            return {"weather_at_capture": weather_at_capture(open_meteo, captured_at)}
+        return {"answer": answer(open_meteo, self._envelope(job, "amedas"), captured_at)}
+
+
+def save_summary(
+    job: WeatherJob, record: dict, summarizer: Summarizer, observations: ObservationRepository
+) -> None:
+    """要約を計算して、ジョブの `summary` に入れ、観測にも写す。ジョブそのものの保存はしない。
+
+    計算や観測への書き込みに失敗したら、例外は投げずにログに出し、`summary` は null にする。
+    """
+    try:
+        summary = summarizer(job, record)
+        observations.update_observation_fields(job.observation_id, summary)
+    except Exception:
+        logger.exception("要約を作れませんでした: %s", job.job_id)
+        job.summary = None
+    else:
+        job.summary = summary
+
+
 class JobRunner:
     """ジョブを1回実行して、状態を更新し、必要なら予約し直す。"""
 
@@ -232,6 +308,7 @@ class JobRunner:
         fetchers: dict[str, Fetcher],
         amedas_enabled: bool | None = None,
         clock: Clock = utc_now,
+        summarizer: Summarizer | None = None,
     ) -> None:
         self._observations = observations
         self._jobs = jobs
@@ -240,6 +317,8 @@ class JobRunner:
         self._amedas_enabled = get_amedas_enabled() if amedas_enabled is None else amedas_enabled
         # 取得関数に渡す時計。封筒の取得時刻やラベルの範囲の確認は、ジョブの now ではなくこれで取る
         self._clock = clock
+        # None なら要約は作らない（summary は null のまま）
+        self._summarizer = summarizer
 
     def run(self, job_id: str, now: datetime | None = None) -> tuple[str, str | None]:
         """戻り値は `("ran" | "ignored", 理由 | None)`。"""
@@ -258,11 +337,13 @@ class JobRunner:
         if record is None:
             job.last_error = "observation_not_found"
             _finish(job, "failed", now)
+            # 観測がないので、label_done は書けない
             self._jobs.update_job(job)
             return "ran", "observation_not_found"
         location = record.get("location")
         if location is None:
             _finish(job, "skipped", now, skip_reason="no_location")
+            mark_label_done(job, self._observations)
             self._jobs.update_job(job)
             return "ran", "no_location"
 
@@ -303,12 +384,14 @@ class JobRunner:
         if not pending:
             failed = any(state.status == "failed" for state in job.providers.values())
             _finish(job, "failed" if failed else "done", now)
+            self._summarize(job, record)
             self._jobs.update_job(job)
         elif job.attempts >= job.max_attempts:
             for state in pending:
                 state.status = "failed"
                 state.error = f"{state.error}; max_attempts" if state.error else "max_attempts"
             _finish(job, "failed", now)
+            self._summarize(job, record)
             self._jobs.update_job(job)
         else:
             job.next_attempt_at = now + wait_time(job.attempts)
@@ -316,6 +399,11 @@ class JobRunner:
             self._jobs.update_job(job)
             _enqueue(job, self._jobs, self._scheduler)
         return "ran", None
+
+    def _summarize(self, job: WeatherJob, record: dict) -> None:
+        if self._summarizer is not None:
+            save_summary(job, record, self._summarizer, self._observations)
+        mark_label_done(job, self._observations)
 
 
 def _finish(

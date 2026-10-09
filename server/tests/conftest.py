@@ -1,6 +1,8 @@
 import copy
 import hashlib
 import json
+import sys
+import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -125,3 +127,52 @@ def token(api: Api) -> str:
 @pytest.fixture
 def metadata() -> dict:
     return copy.deepcopy(make_metadata())
+
+
+WEATHER_AT_CAPTURE = {
+    "category": "cloudy",
+    "weather_code": 3,
+    "temperature_c": 18.2,
+    "precipitation_mm": 0.0,
+    "cloud_cover_pct": 90,
+}
+RAIN_ANSWER = {"result": "rain", "source": "amedas"}
+
+
+class FakeSummary(types.ModuleType):
+    """`sky_server.summary` の偽物。計算はせず、決まった値を返して、呼ばれ方を `calls` に残す。
+
+    `error` に例外を入れると、`weather_at_capture` と `answer` がそれを投げる。
+    """
+
+    def __init__(self) -> None:
+        super().__init__("sky_server.summary")
+        self.weather = WEATHER_AT_CAPTURE
+        self.result = RAIN_ANSWER
+        self.error: Exception | None = None
+        self.calls: list[tuple] = []
+
+    def weather_at_capture(self, open_meteo_envelope, captured_at):
+        self.calls.append(("weather_at_capture", open_meteo_envelope, captured_at))
+        if self.error:
+            raise self.error
+        return self.weather
+
+    def answer(self, open_meteo_envelope, amedas_envelope, captured_at):
+        self.calls.append(("answer", open_meteo_envelope, amedas_envelope, captured_at))
+        if self.error:
+            raise self.error
+        return self.result
+
+    def is_correct(self, user_guess, answer):
+        if user_guess is None or answer is None or answer["result"] == "unknown":
+            return None
+        return user_guess == answer["result"]
+
+
+@pytest.fixture
+def fake_summary(monkeypatch) -> FakeSummary:
+    """要約の計算を偽物に差し替える。本物の `sky_server.summary` があってもなくても動く。"""
+    fake = FakeSummary()
+    monkeypatch.setitem(sys.modules, "sky_server.summary", fake)
+    return fake

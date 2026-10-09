@@ -45,6 +45,24 @@ class ObservationRepository(ABC):
         """撮影者の観測をすべて返す。"""
 
     @abstractmethod
+    def update_observation_fields(self, observation_id: str, fields: dict) -> None:
+        """観測の項目を、渡したものだけ書き換える（なければ足す）。観測がなければ例外を投げる。"""
+
+    @abstractmethod
+    def list_observations_page(
+        self, user_id: str, limit: int, before: tuple[str, str] | None
+    ) -> list[dict]:
+        """撮影者の観測を `(captured_at_utc, observation_id)` の降順で最大 `limit` 件返す。
+
+        `before` があれば、その組より後ろ（並び順で）のものだけを返す。
+        `captured_at_utc` がない観測は含めない。
+        """
+
+    @abstractmethod
+    def list_all_observation_ids(self) -> list[str]:
+        """すべての観測の ID を返す（撮影者を問わない）。"""
+
+    @abstractmethod
     def delete_observation(self, observation_id: str) -> None:
         """観測を消す。なければ何もしない。"""
 
@@ -140,6 +158,27 @@ class LocalObservationRepository(ObservationRepository):
             for path in self._observations.glob("*.json")
         )
         return [record for record in records if record.get("user_id") == user_id]
+
+    def update_observation_fields(self, observation_id: str, fields: dict) -> None:
+        path = self._observations / f"{observation_id}.json"
+        record = {**json.loads(path.read_text(encoding="utf-8")), **fields}
+        _write_atomic(path, json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8"))
+
+    def list_observations_page(
+        self, user_id: str, limit: int, before: tuple[str, str] | None
+    ) -> list[dict]:
+        records = [
+            record
+            for record in self.list_observations_by_user(user_id)
+            if "captured_at_utc" in record
+        ]
+        records.sort(key=lambda r: (r["captured_at_utc"], r["observation_id"]), reverse=True)
+        if before is not None:
+            records = [r for r in records if (r["captured_at_utc"], r["observation_id"]) < before]
+        return records[:limit]
+
+    def list_all_observation_ids(self) -> list[str]:
+        return sorted(path.stem for path in self._observations.glob("*.json"))
 
     def delete_observation(self, observation_id: str) -> None:
         (self._observations / f"{observation_id}.json").unlink(missing_ok=True)

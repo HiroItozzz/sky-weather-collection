@@ -7,13 +7,21 @@ def test_healthzは認証なしでokを返す(api):
     assert res.json() == {"status": "ok"}
 
 
-def test_自分の観測を取得できる(api, token):
+def test_自分の観測を取得できる(api, token, fake_summary):
     api.put(token)
     res = api.client.get(f"/v1/observations/{OBSERVATION_ID}", headers=_auth(token))
     assert res.status_code == 200
-    body = res.json()
-    assert body["observation_id"] == OBSERVATION_ID
-    assert body["received_at"] == api.repository.get_observation(OBSERVATION_ID)["received_at"]
+    record = api.repository.get_observation(OBSERVATION_ID)
+    # 要約はまだないので、天気は null、答えは不明になる
+    assert res.json() == {
+        "observation_id": OBSERVATION_ID,
+        "received_at": record["received_at"],
+        "captured_at": record["captured_at"],
+        "user_guess": None,
+        "weather_at_capture": None,
+        "answer": {"result": "unknown", "source": None, "pending": True},
+        "correct": None,
+    }
 
 
 def test_存在しない観測は404(api, token):

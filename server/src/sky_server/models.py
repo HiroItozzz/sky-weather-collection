@@ -9,10 +9,22 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 UUID_PATTERN = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 SHA256_PATTERN = r"^[0-9a-fA-F]{64}$"
 
+# これより前の撮影時刻は受け付けない（年が4桁にならない時刻や、UTC に直すとあふれる時刻を避ける）
+MIN_CAPTURED_AT = datetime(2020, 1, 1, tzinfo=UTC)
+
 # サーバー時刻よりこれ以上未来の撮影時刻は受け付けない
 MAX_FUTURE = timedelta(minutes=10)
 
 Float = Annotated[float, Field(allow_inf_nan=False)]
+
+
+def to_utc_millis(t: datetime) -> str:
+    """時刻を UTC のミリ秒までの文字列（例 `2026-10-09T03:00:00.123Z`）にする。
+
+    文字列のまま並べると時刻順になる。
+    """
+    utc = t.astimezone(UTC)
+    return f"{utc.year:04d}-{utc:%m-%dT%H:%M:%S}.{utc.microsecond // 1000:03d}Z"
 
 
 class PrivacyZone(BaseModel):
@@ -99,7 +111,9 @@ class ObservationMetadata(_Strict):
 
     @field_validator("captured_at")
     @classmethod
-    def _not_future(cls, value: datetime) -> datetime:
+    def _within_range(cls, value: datetime) -> datetime:
+        if value < MIN_CAPTURED_AT:
+            raise ValueError("captured_at が 2020-01-01T00:00:00Z より前になっている")
         if value > datetime.now(UTC) + MAX_FUTURE:
             raise ValueError("captured_at がサーバー時刻より10分以上未来になっている")
         return value
@@ -108,6 +122,7 @@ class ObservationMetadata(_Strict):
         return {
             **self.model_dump(mode="json"),
             "user_id": user_id,
+            "captured_at_utc": to_utc_millis(self.captured_at),
             "received_at": received_at.isoformat(),
             "image_key": image_key,
         }

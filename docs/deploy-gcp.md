@@ -86,6 +86,20 @@ gcloud tasks queues create $QUEUE \
 
 - Firestore の無料枠は、プロジェクトの `(default)` データベースだけに付く（要確認）。別の名前のデータベースは作らない。
 
+Firestore の複合インデックスを作る。アプリのタイムライン（`GET /v1/me/observations`）が、撮影者ごとに撮影時刻の新しい順で観測を読むために使う（`docs/m5-server.md` 6節）。作り終わるまで数分かかる。
+
+```sh
+gcloud firestore indexes composite create \
+  --collection-group=observations \
+  --field-config=field-path=user_id,order=ascending \
+  --field-config=field-path=captured_at_utc,order=descending \
+  --field-config=field-path=observation_id,order=descending
+
+gcloud firestore indexes composite list   # STATE が READY になれば使える
+```
+
+インデックスがないまま一覧を呼ぶと、サーバーのログに「インデックスが必要」というエラーと、作るための URL が出る。
+
 ## 4. サービスアカウントと権限
 
 ```sh
@@ -211,6 +225,13 @@ uv run python -m sky_server.admin delete-user --user-id <user_id> --yes
 ## 7. 更新
 
 コードを変えたら、5節の `gcloud run deploy` を同じ引数でもう一度実行する（環境変数は前回の値が残るので、`--set-env-vars` は省いてもよい）。
+
+デプロイで保存の形が変わったときは、古いリビジョンへのトラフィックがなくなってから、手元の PC から（撮影者の作成と同じ環境変数を付けて）`rebuild-summaries` を1回実行する。M5 の初回のデプロイでは必ず実行する（`captured_at_utc` がない古い観測は、タイムラインの一覧に出ないため）。
+
+```sh
+gcloud run revisions list --service=$SERVICE --region=$REGION   # 古いリビジョンのトラフィックが 0% になったことを確かめる
+uv run python -m sky_server.admin rebuild-summaries
+```
 
 Artifact Registry には、デプロイのたびにイメージが残る。無料枠（0.5GB、要確認）を超えないように、古いイメージを消す設定を入れておく。
 

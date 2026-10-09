@@ -36,6 +36,12 @@ class FakeDocument:
             else:
                 doc[key] = value
 
+    def update(self, fields: dict) -> None:
+        # 本物の Firestore と同じく、ないドキュメントは更新できない
+        if self._id not in self._docs:
+            raise NotFound("ありません")
+        self._docs[self._id].update(fields)
+
     def get(self) -> FakeSnapshot:
         return FakeSnapshot(self._docs.get(self._id))
 
@@ -45,25 +51,74 @@ class FakeDocument:
 
 
 class FakeQuery:
-    def __init__(self, docs: dict, field_filter=None, limit: int | None = None) -> None:
+    def __init__(
+        self,
+        docs: dict,
+        field_filter=None,
+        limit: int | None = None,
+        orders: tuple = (),
+        start_after: dict | None = None,
+    ) -> None:
         self._docs = docs
         self._filter = field_filter
         self._limit = limit
+        self._orders = orders
+        self._start_after = start_after
+
+    def _copy(self, **changes) -> "FakeQuery":
+        args = {
+            "field_filter": self._filter,
+            "limit": self._limit,
+            "orders": self._orders,
+            "start_after": self._start_after,
+            **changes,
+        }
+        return FakeQuery(self._docs, **args)
 
     def where(self, filter) -> "FakeQuery":
         assert filter.op_string == "=="
-        return FakeQuery(self._docs, filter, self._limit)
+        return self._copy(field_filter=filter)
+
+    def order_by(self, field_path: str, direction: str = firestore.Query.ASCENDING) -> "FakeQuery":
+        return self._copy(orders=(*self._orders, (field_path, direction)))
+
+    def start_after(self, values: dict) -> "FakeQuery":
+        # order_by に並べた項目すべての値を、辞書で渡す形だけを真似る
+        assert set(values) == {path for path, _ in self._orders}
+        return self._copy(start_after=values)
 
     def limit(self, count: int) -> "FakeQuery":
-        return FakeQuery(self._docs, self._filter, count)
+        return self._copy(limit=count)
 
     def stream(self):
         found = [
-            FakeSnapshot(data, FakeDocument(self._docs, doc_id))
+            (doc_id, data)
             for doc_id, data in self._docs.items()
-            if data.get(self._filter.field_path) == self._filter.value
+            if self._filter is None or data.get(self._filter.field_path) == self._filter.value
         ]
-        return iter(found[: self._limit])
+        # order_by に指定した項目を持たないドキュメントは、本物と同じく結果に出ない
+        for path, _ in self._orders:
+            found = [(doc_id, data) for doc_id, data in found if path in data]
+
+        # 後ろの項目から順に安定ソートして、複数の項目の並び順を作る
+        for path, direction in reversed(self._orders):
+            found.sort(
+                key=lambda item, path=path: item[1][path],
+                reverse=direction == firestore.Query.DESCENDING,
+            )
+        if self._start_after is not None:
+            # 項目ごとの昇順・降順が混ざっても使えるよう、1項目ずつ「後ろか」を比べる
+            def is_after(data: dict) -> bool:
+                for path, direction in self._orders:
+                    value, boundary = data[path], self._start_after[path]
+                    if value == boundary:
+                        continue
+                    return (value < boundary) == (direction == firestore.Query.DESCENDING)
+                return False
+
+            found = [item for item in found if is_after(item[1])]
+        snapshots = [FakeSnapshot(data, FakeDocument(self._docs, doc_id)) for doc_id, data in found]
+        return iter(snapshots[: self._limit])
 
 
 class FakeCollection(FakeQuery):
