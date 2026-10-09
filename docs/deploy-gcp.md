@@ -226,6 +226,13 @@ uv run python -m sky_server.admin delete-user --user-id <user_id> --yes
 
 コードを変えたら、5節の `gcloud run deploy` を同じ引数でもう一度実行する（環境変数は前回の値が残るので、`--set-env-vars` は省いてもよい）。
 
+デプロイで保存の形が変わったときは、古いリビジョンへのトラフィックがなくなってから、手元の PC から（撮影者の作成と同じ環境変数を付けて）`rebuild-summaries` を1回実行する。M5 の初回のデプロイでは必ず実行する（`captured_at_utc` がない古い観測は、タイムラインの一覧に出ないため）。
+
+```sh
+gcloud run revisions list --service=$SERVICE --region=$REGION   # 古いリビジョンのトラフィックが 0% になったことを確かめる
+uv run python -m sky_server.admin rebuild-summaries
+```
+
 Artifact Registry には、デプロイのたびにイメージが残る。無料枠（0.5GB、要確認）を超えないように、古いイメージを消す設定を入れておく。
 
 ```sh

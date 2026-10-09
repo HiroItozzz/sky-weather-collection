@@ -11,7 +11,9 @@
 ### 1.1 撮影時の天気（`weather_at_capture(open_meteo_envelope, captured_at)`）
 
 - `forecast` のジョブで取った Open-Meteo の封筒を使う。
-- `hourly.time`（UTC、`YYYY-MM-DDTHH:MM`）から、時刻 T = `ceil_hour(captured_at)`（ちょうど時なら captured_at そのもの）の行を選ぶ。Open-Meteo の1時間値の降水量は「その時刻までの1時間の合計」なので、撮影時刻を含む1時間 (T-1h, T] の値はこの行になる。
+- `hourly.time`（UTC、`YYYY-MM-DDTHH:MM`）から、変数によって違う行を選ぶ（design.md 13.3、監督の決定）。
+  - `precipitation`：時刻 T = `ceil_hour(captured_at)`（ちょうど時なら captured_at そのもの）の行。Open-Meteo の1時間値の降水量は「その時刻までの1時間の合計」なので、撮影時刻を含む1時間 (T-1h, T] の値はこの行になる。
+  - `weather_code`、`temperature_2m`、`cloud_cover`：撮影時刻に最も近い時刻の行（時に丸める。ちょうど30分は切り上げる）。これらはその時刻の状態を表す値なので。
 - 取り出す変数（`jma_seamless`。複数のモデルを1回で取っているので、変数名の後ろに `_jma_seamless` が付く）：`weather_code`、`temperature_2m`、`precipitation`、`cloud_cover`。
 - 返す形：`{"category", "weather_code", "temperature_c", "precipitation_mm", "cloud_cover_pct"}`。
   - `weather_code` が取れない（行がない、値が null）か、`category` が決まらないときは、全体を null にする（アプリは `category` が3つのどれかでないと、その観測を読めないため）。
@@ -33,6 +35,8 @@
    - 4つすべてが数値なら、合計（小数第6位で丸める）が 0.1 以上で `rain`、未満で `no_rain`。`source` は `open_meteo`。
 3. どちらもそろわなければ `{"result": "unknown", "source": null}`。
 
+- 10分値・15分値は「その時刻までの10分間・15分間」の値なので、対象の時間帯の始まりの刻みには、t より前の時間が最大で14分ほど含まれる（例：t が 12:03 なら 12:10 の10分値は 12:00〜12:10）。ゲームの答え合わせ用なので、このずれは許す（監督の決定）。学習用のラベルは別に決める。
+
 - 封筒が null（そのプロバイダーの取得に失敗した）なら、そのプロバイダーは「そろわない」として扱う。
 - 本文が JSON として読めない、形が違う（キーがない、配列の長さが違う）ときも「そろわない」とする。例外は投げない。
 
@@ -50,8 +54,13 @@
   - `ObservationRepository` に `update_observation_fields(observation_id, fields: dict)` を足す（Firestore は `update`、ローカル版は読んで書き直す）。
 - 要約の計算や観測への書き込みに失敗しても、ジョブの状態はそのまま（`done` / `failed`）。`summary` は null にして、エラーをログに出す。
 - 封筒は、ジョブの `providers.*.blob_key` から `weather_store` で読む。
+- `label` のジョブが終わったとき（`done`、`failed`、`skipped` のどれでも。要約の計算に失敗したときも）、観測に `label_done: true` を書く。答えが出るのを待っているかどうか（4.1節の `pending`）を、観測だけで判断できるようにするため。
+  - `answer` があるかどうかで判断しないのは、位置がない観測（`skipped`）や要約の計算に失敗した観測では `answer` が書かれず、いつまでも待ちのままに見えてしまうため。
+  - 位置がない観測は、作った時点で `label` のジョブが `skipped` になるので、`ensure_weather_jobs` で観測に `label_done: true` を書く。
 
 ## 3. 撮影時刻の UTC（`captured_at_utc`）
+
+- `captured_at` は 2020-01-01T00:00:00Z より前なら 422（過去側の下限）。年が4桁にならない時刻や、UTC に直すときにあふれる時刻で、カーソルが壊れたり 500 になったりしないようにするため。`captured_at_utc` の年は4桁で書く。
 
 - `captured_at` はアプリが送ったタイムゾーンのまま保存しているので、文字列で並べると順番が崩れる。受け取ったときに `captured_at_utc`（UTC、ミリ秒まで、末尾 `Z`。例 `2026-10-09T03:00:00.123Z`）をサーバーの項目として足す。
 - 並び順、カーソル、Firestore の複合インデックスはこれを使う。応答の `captured_at` は今までどおり（送られた値）。
@@ -69,12 +78,14 @@
   "captured_at": "...",
   "user_guess": "rain",
   "weather_at_capture": {"category": "cloudy", "weather_code": 3, "temperature_c": 18.2, "precipitation_mm": 0.0, "cloud_cover_pct": 90},
-  "answer": {"result": "rain", "source": "amedas"},
+  "answer": {"result": "rain", "source": "amedas", "pending": false},
   "correct": true
 }
 ```
 
-- 観測に `weather_at_capture` がなければ null。`answer` がなければ `{"result": "unknown", "source": null}`。
+- `answer` に `pending`（真偽値）を入れる（design.md 13.5、監督の決定）。観測に `label_done` が true でなければ `pending: true`、true なら `false`。
+- 観測に `weather_at_capture` がなければ null。`answer` がなければ `{"result": "unknown", "source": null, "pending": ...}`。
+- `before` は 128 文字まで（`Query(max_length=128)`）。深い入れ子の JSON で読み込みが例外を出さないようにするため。
 
 ### 4.2 `GET /v1/observations/{id}`
 
@@ -115,9 +126,11 @@
 
 - すべての観測について、次を行う。
   - `captured_at_utc` がなければ足す。
-  - `forecast` と `label` のジョブが `done` か `failed` なら、封筒から要約を計算し直し、ジョブと観測に保存する。
+  - `forecast` と `label` のジョブが `done` か `failed` なら、封筒から要約を計算し直し、ジョブと観測に保存する。計算や観測への書き込みに失敗したときは、ジョブにも観測にも何も書かない（前の要約を null で消さない）。
+  - `label` のジョブが `done`・`failed`・`skipped` なら、観測に `label_done: true` を書く。
+- 観測の一覧は、先にすべての ID を読んでから1件ずつ処理する（Firestore のストリームを開いたまま長く処理すると、期限が切れることがあるため）。
 - 1件の失敗で止めず、最後に「処理した件数、失敗した件数」を表示する。失敗が1件でもあれば終了コード 1。
-- `ObservationRepository` に `list_all_observations() -> Iterator[dict]` を足す。
+- `ObservationRepository` に `list_all_observation_ids() -> list[str]` を足す（`list_all_observations` の代わり）。
 
 ## 6. Firestore の複合インデックス
 
