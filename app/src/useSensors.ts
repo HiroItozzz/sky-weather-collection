@@ -4,10 +4,11 @@ import * as Location from "expo-location";
 import { DeviceMotion, Magnetometer } from "expo-sensors";
 import { cameraAngles, rotationFromDeviceMotion } from "./orientation";
 import { magneticModel } from "./declination";
-import type { LocationInput, Sample } from "./record";
+import type { LocationInput } from "./record";
+import { addSample, EMPTY_BUFFER, extractWindow, type SampleBuffer } from "./sampleClock";
 
-/** サンプルを持っておく長さ（ミリ秒） */
-const KEEP_MS = 2000;
+/** サンプルを持っておく長さ（ミリ秒）。撮影に数秒かかっても、押した 0.5 秒前からの分が残るようにする */
+const KEEP_MS = 10_000;
 /** 表示用の状態を更新する間隔（ミリ秒）。約 10 回/秒 */
 const DISPLAY_INTERVAL_MS = 100;
 
@@ -35,7 +36,7 @@ const EMPTY_VIEW: SensorView = {
 };
 
 export function useSensors() {
-  const samplesRef = useRef<Sample[]>([]);
+  const samplesRef = useRef<SampleBuffer>(EMPTY_BUFFER);
   const magnetometerRef = useRef<number | null>(null);
   const locationRef = useRef<LocationInput | null>(null);
   const headingAccuracyRef = useRef<number | null>(null);
@@ -63,11 +64,16 @@ export function useSensors() {
         DeviceMotion.addListener((m) => {
           // rotation は null のことがある
           if (!m.rotation) return;
-          const now = Date.now();
-          const R = rotationFromDeviceMotion(m.rotation.alpha, m.rotation.beta, m.rotation.gamma);
-          const samples = samplesRef.current;
-          samples.push({ t: now, R });
-          while (samples.length > 0 && now - samples[0].t > KEEP_MS) samples.shift();
+          const { alpha, beta, gamma, timestamp } = m.rotation;
+          // 時刻はセンサーが測った時刻を使う。受け取った時刻は、時計のずれの推定にだけ使う
+          const sample = {
+            tSensorMs: timestamp * 1000,
+            alpha,
+            beta,
+            gamma,
+            R: rotationFromDeviceMotion(alpha, beta, gamma),
+          };
+          samplesRef.current = addSample(samplesRef.current, sample, Date.now(), KEEP_MS);
         }),
       );
     });
@@ -98,7 +104,7 @@ export function useSensors() {
 
     // 表示用の状態は約 10 回/秒にまとめて更新する
     const timer = setInterval(() => {
-      const latest = samplesRef.current[samplesRef.current.length - 1];
+      const latest = samplesRef.current.samples[samplesRef.current.samples.length - 1];
       const angles = latest ? cameraAngles(latest.R) : null;
       const location = locationRef.current;
       setView({
@@ -128,9 +134,9 @@ export function useSensors() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location]);
 
-  /** 指定した時刻の前後 0.5 秒のサンプルを返す。 */
-  const getSamplesAround = useCallback((t: number): Sample[] => {
-    return samplesRef.current.filter((s) => Math.abs(s.t - t) <= 500);
+  /** 壁時計の時刻が [startMs, endMs] に入るサンプル（撮影の窓）と、時計のずれ offsetMs を返す。 */
+  const getWindow = useCallback((startMs: number, endMs: number) => {
+    return extractWindow(samplesRef.current, startMs, endMs);
   }, []);
 
   /** 記録の時点の最新の位置と heading の accuracy を返す。 */
@@ -139,5 +145,5 @@ export function useSensors() {
     [],
   );
 
-  return { view, model, motionAvailable, locationGranted, getSamplesAround, getLatest };
+  return { view, model, motionAvailable, locationGranted, getWindow, getLatest };
 }

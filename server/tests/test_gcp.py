@@ -2,7 +2,7 @@ import logging
 from datetime import UTC, datetime
 
 import pytest
-from conftest import make_metadata
+from conftest import make_capture, make_metadata
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from gcp_fakes import FakeFirestoreClient, FakeStorageClient, FakeTasksClient
@@ -91,6 +91,22 @@ def test_firestore_観測は同じIDなら保存せずFalse():
     assert repo.add_observation({"observation_id": "o1", "n": 1}) is True
     assert repo.add_observation({"observation_id": "o1", "n": 2}) is False
     assert repo.get_observation("o1") == {"observation_id": "o1", "n": 1}
+
+
+def test_firestore_配列の中に配列があるとフェイクは拒否する():
+    repo = FirestoreObservationRepository(FakeFirestoreClient())
+    with pytest.raises(ValueError):
+        repo.add_observation({"observation_id": "o1", "trace": [[1.0, 2.0]]})
+
+
+def test_firestore_captureつきの観測を保存して読み戻せる():
+    meta = make_metadata()
+    meta["capture"] = make_capture()
+    record = ObservationMetadata.model_validate(meta).with_server_fields("u1", RUN_AT, "key.jpg")
+    repo = FirestoreObservationRepository(FakeFirestoreClient())
+    assert repo.add_observation(record) is True
+    saved = repo.get_observation(meta["observation_id"])
+    assert saved["capture"]["orientation_trace"]["alpha"] == [0.12, 0.13]
 
 
 def test_firestore_ジョブの作成と取得と更新():

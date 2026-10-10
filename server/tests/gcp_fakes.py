@@ -14,17 +14,31 @@ class FakeSnapshot:
         return None if self._data is None else dict(self._data)
 
 
+def reject_nested_arrays(value, inside_array: bool = False) -> None:
+    """本物の Firestore と同じく、配列の中に配列があれば ValueError にする。"""
+    if isinstance(value, dict):
+        for item in value.values():
+            reject_nested_arrays(item, inside_array)
+    elif isinstance(value, list | tuple):
+        if inside_array:
+            raise ValueError("Cannot convert an array value in an array value.")
+        for item in value:
+            reject_nested_arrays(item, True)
+
+
 class FakeDocument:
     def __init__(self, docs: dict, doc_id: str) -> None:
         self._docs = docs
         self._id = doc_id
 
     def create(self, data: dict) -> None:
+        reject_nested_arrays(data)
         if self._id in self._docs:
             raise AlreadyExists("すでにあります")
         self._docs[self._id] = dict(data)
 
     def set(self, data: dict, merge: bool = False) -> None:
+        reject_nested_arrays(data)
         if not merge:
             self._docs[self._id] = dict(data)
             return
@@ -37,6 +51,7 @@ class FakeDocument:
                 doc[key] = value
 
     def update(self, fields: dict) -> None:
+        reject_nested_arrays(fields)
         # 本物の Firestore と同じく、ないドキュメントは更新できない
         if self._id not in self._docs:
             raise NotFound("ありません")

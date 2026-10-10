@@ -60,6 +60,28 @@ def make_metadata(image: bytes = IMAGE, observation_id: str = OBSERVATION_ID) ->
     }
 
 
+def make_capture() -> dict:
+    pressed_at = datetime.now(UTC) - timedelta(seconds=2)
+    return {
+        "pressed_at": pressed_at.isoformat(timespec="milliseconds"),
+        "completed_at": (pressed_at + timedelta(milliseconds=985)).isoformat(
+            timespec="milliseconds"
+        ),
+        "duration_ms": 985,
+        "motion_deg": 3.2,
+        "sensor_clock_offset_ms": 1791530000123.4,
+        "exif_datetime_original": "2026:10:10 10:23:46",
+        "exif_subsec_time_original": "512",
+        "orientation_trace": {
+            "source": "expo-sensors DeviceMotion rotation (alpha, beta, gamma)",
+            "t_sensor_ms": [123456789.0, 123456809.0],
+            "alpha": [0.12, 0.13],
+            "beta": [1.45, 1.44],
+            "gamma": [-0.03, -0.03],
+        },
+    }
+
+
 def fixed_clock(t: datetime):
     """いつも同じ時刻を返す時計。"""
     return lambda: t
