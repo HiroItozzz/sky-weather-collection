@@ -242,3 +242,80 @@ SKY_E2E_URL=http://127.0.0.1:8000 SKY_E2E_TOKEN=<招待コード> npm run test:e
 9. **招待コードが違うとき**：設定でコードを変えて撮る。「招待コードが違う」と表示され、送られない。正しいコードに戻すと送られる。
 10. **キャリブレーション**：PC やスピーカーに近づけると、8の字に振るよう表示される。
 11. **撮影にかかる時間**：「保存しました（撮影 N ms）」の N を何回か控える。数百 ms を超えるなら、向きを取る時刻（押した時刻）とシャッターが切れた時刻がずれるので、向きを取る時刻の決め方を見直す。
+
+## 9. 撮影中の向きの記録（実機の確認を受けた見直し）
+
+### 9.1 背景
+
+- 実機（Android、Expo Go）で、シャッターを押してから `takePictureAsync` が返るまでが 497〜1444ms とばらついた。露光はこの間のどこかで起きるが、Expo（SDK 57）の `takePictureAsync` は露光の時刻（CameraX の `ImageInfo.timestamp`）を JS に渡さないので、正確な瞬間はわからない。
+- 予測に使う向きの精度は、方位角 ±15〜20°、仰角 ±5〜10° で足りる見込み（設計の議論の第4ラウンド）。端末を止めて撮れば露光の瞬間がいつでも向きはほぼ同じなので、困るのは撮影中に端末を動かしたときだけ。
+- そこで次の4つを行う。露光の時刻を取る方法（development build に移って expo-camera にパッチを当てる、EXIF の時刻を使う）は見送る。撮影中に動いた写真が多く、予測への悪影響がわかったら考え直す。そのときに過去の写真も計算し直せるよう、撮影中の向きをすべて記録しておく。
+
+### 9.2 撮影中の表示
+
+- シャッターを押してから `takePictureAsync` が返るまで、「撮影中…動かさないでください」を表示する。
+
+### 9.3 サンプルの時刻
+
+- これまでサンプルの時刻は、JS で受け取ったときの `Date.now()` だった。撮影中は JS のスレッドが忙しく、受け取りが遅れる。
+- これからは、DeviceMotion の `rotation.timestamp`（センサーが値を測った時刻。秒。端末の起動からの経過時間で、`Date.now()` とは別の時計）を正とする。
+  - `tSensorMs = rotation.timestamp * 1000`
+  - 同じ `tSensorMs` のサンプルが続けて届いたら、2つめ以降は捨てる。
+  - 時計のずれ `offsetMs = min(受け取ったときの Date.now() − tSensorMs)` を、受け取るたびに更新する（受け取りの遅れが最も小さかったときの値が、本当のずれにいちばん近いため）。
+  - サンプルの壁時計の時刻は `t = tSensorMs + offsetMs` とする。`offsetMs` は使う時点の値で計算し直す（サンプルに固定しない）。
+- サンプルには、回転行列 `R` に加えて、生の `alpha`・`beta`・`gamma`（ラジアン）と `tSensorMs` を持たせる。
+- サンプルを持っておく長さ（`KEEP_MS`）は 10 秒にする（撮影に数秒かかっても、押した 0.5 秒前からの分が残るように）。
+
+### 9.4 撮影の窓と代表の向き
+
+- `pressedAtMs`：シャッターを押した時刻（`Date.now()`）。`captured_at` は今までどおりこの時刻。
+- `completedAtMs`：`takePictureAsync` が返った時刻（`Date.now()`）。
+- 撮影が終わってから、`t` が `[pressedAtMs − 500, completedAtMs]` に入るサンプルを取り出す（撮影の窓）。
+- 代表の向き（今の `orientation` の `azimuth_deg`・`pitch_deg`・`roll_deg`）は、`t` が `(pressedAtMs + completedAtMs) / 2` に最も近いサンプルから計算する。押した時刻ではなく撮影の窓の中ほどを使うのは、露光が窓のどこで起きたかわからないため。
+- `orientation.stddev_deg` は、撮影の窓のサンプルで計算する（今の `angularSpreadDeg` と同じ計算）。
+- 撮影の窓のサンプルが1つもなければ、今までどおり `orientation` は null。
+
+### 9.5 メタデータに足す項目（`capture`）
+
+`schema_version` は 1 のまま、任意の項目 `capture` を足す。サーバーは、ない場合（古いアプリ）も受け付ける。
+
+```json
+"capture": {
+  "pressed_at": "2026-10-10T01:23:45.678Z",
+  "completed_at": "2026-10-10T01:23:46.663Z",
+  "duration_ms": 985,
+  "motion_deg": 3.2,
+  "sensor_clock_offset_ms": 1791530000123.4,
+  "exif_datetime_original": "2026:10:10 10:23:46",
+  "exif_subsec_time_original": "512",
+  "orientation_trace": {
+    "source": "expo-sensors DeviceMotion rotation (alpha, beta, gamma)",
+    "samples": [[123456789.0, 0.12, 1.45, -0.03], ...]
+  }
+}
+```
+
+| 項目 | 内容 |
+|---|---|
+| `pressed_at` / `completed_at` | 9.4 の時刻（UTC、ミリ秒） |
+| `duration_ms` | `completedAtMs − pressedAtMs`（整数、0 以上） |
+| `motion_deg` | 撮影の窓の中で、カメラの向き（カメラ方向ベクトル）が最も離れた2つのサンプルのなす角（度、0〜180）。サンプルが2つ未満なら null。なす角は `atan2(|a×b|, a·b)` で求める |
+| `sensor_clock_offset_ms` | 9.3 の `offsetMs`。まだサンプルが届いていなければ null |
+| `exif_datetime_original` / `exif_subsec_time_original` | 写真の EXIF の `DateTimeOriginal`・`SubSecTimeOriginal` を、そのままの文字列で（なければ null）。露光の時刻を割り出せるか、あとで調べるため |
+| `orientation_trace.source` | サンプルの出どころ（文字列、200 文字まで） |
+| `orientation_trace.samples` | 撮影の窓のサンプル。1件は `[tSensorMs, alpha, beta, gamma]`（ミリ秒・ラジアン）。時刻の古い順。最大 1000 件 |
+
+- `orientation_trace` は、撮影の窓のサンプルがなければ null。
+- 角度に直す前の値を残すのは、露光の時刻があとでわかったときに、どのサンプルを使うかを選び直し、同じ計算で向きを求め直せるようにするため。
+- サーバーは保存するだけで、`motion_deg` などで受け付けを判断しない。学習で使う基準（例：10° 未満はそのまま、10〜30° は印、30° 以上は向きを欠損扱い）は、データが溜まってから分布を見て決める。
+
+### 9.6 サーバーの検証（`server/src/sky_server/models.py`）
+
+- `ObservationMetadata` に `capture: Capture | None = None` を足す（キーがなくてもよい唯一の項目）。
+- `Capture`（知らない項目は 422）
+  - `pressed_at`・`completed_at`：タイムゾーン付きの時刻。`completed_at >= pressed_at`。
+  - `duration_ms`：0 以上 600000 以下の整数。
+  - `motion_deg`：0 以上 180 以下、または null。
+  - `sensor_clock_offset_ms`：有限の数、または null。
+  - `exif_datetime_original`・`exif_subsec_time_original`：64 文字までの文字列、または null。
+  - `orientation_trace`：null、または `{source: 1〜200 文字, samples: 0〜1000 件の [有限の数 ×4]}`。

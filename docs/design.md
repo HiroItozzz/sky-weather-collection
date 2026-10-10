@@ -70,6 +70,7 @@ ml/          学習用のコードとノートブック
 | `device` | `platform`（android / ios / web）, `os_version`, `model`, `app_version` |
 | `capture_path` | 撮影の経路（native / web） |
 | `user_guess` | 予想ゲームの回答（降る / 降らない / 未回答） |
+| `capture` | 撮影の時刻の幅（押した時刻・撮影が終わった時刻）、撮影中に動いた角度、撮影中の向きの記録、EXIF の撮影時刻（任意の項目。詳細は `docs/m3-app-capture.md` の 9 節） |
 | `image_sha256` | 転送中の破損を検出するためのハッシュ |
 
 - `location.altitude_m` は WGS84 楕円体からの高さ（Android の `Location.getAltitude()` の値）をそのまま記録する。海抜ではない（日本ではおよそ 30〜40m 大きい）。高度の精度が取れないときは null。
