@@ -1,7 +1,13 @@
 // 1 件の観測を fetch で PUT し、応答を送信の結果に分類する。仕様は docs/m3-app-capture.md の 4 節。
 
-/** 端末では { uri, name, type }、テストとノードでは Blob。 */
-export type ImagePart = { uri: string; name: string; type: string } | Blob;
+/**
+ * 端末では { name, type, bytes }、テストとノードでは Blob。
+ * 端末の fetch（expo/fetch）は、FormData のファイルを bytes() で読み、name と type をパートのヘッダーに使う。
+ * React Native の古い形（{ uri, name, type }）は受け付けない。
+ */
+export type ImagePart =
+  | { name: string; type: string; bytes: () => Promise<Uint8Array> }
+  | Blob;
 
 export type Outcome =
   | { kind: "ok" }
@@ -80,7 +86,7 @@ export function createFetchTransport(fetchImpl: typeof fetch = fetch): Transport
       if (typeof Blob !== "undefined" && image instanceof Blob) {
         form.append("image", image, "image.jpg");
       } else {
-        // React Native の FormData は { uri, name, type } を受け取れるが、型定義は Blob だけなので付け替える
+        // expo/fetch の FormData は bytes() を持つものを受け取れるが、型定義は Blob だけなので付け替える
         form.append("image", image as unknown as Blob);
       }
 

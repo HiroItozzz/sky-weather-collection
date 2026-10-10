@@ -30,7 +30,7 @@ M3 では、空の写真を撮って、設計メモ4節のメタデータと一�
 
 ### 1.4 アップロード
 
-- React Native の `FormData` は、ファイルを `{ uri, name, type }` の形で受け取り、ファイルの中身を multipart で送る。`fetch` は PUT でも使える。
+- Expo（SDK 52 以降）では、グローバルの `fetch` が `expo/fetch` に置き換わっている。その `FormData` はファイルを `{ uri, name, type }` の形では受け取れず（`Unsupported FormDataPart implementation` になる）、`bytes()` を持つもの（`expo-file-system` の `File` など）を読み込んで送る。そこで画像は `{ name, type, bytes: () => file.bytes() }` の形で渡す。`name` と `type` はパートのヘッダー（`filename`、`Content-Type`）に使われる。（実機の確認で判明）
 - サーバー（`server/src/sky_server/models.py`）は、`location.accuracy_m` を null 不可、`device` の各値を null 不可の文字列にしている。`camera` はオブジェクト自体は必須で、各値は null 可。
 
 ### 1.5 平文の HTTP
@@ -92,7 +92,7 @@ M3 では、空の写真を撮って、設計メモ4節のメタデータと一�
 
 ### 4.1 1件の送り方
 
-- `PUT {サーバーの URL}/v1/observations/{observation_id}`、ヘッダー `Authorization: Bearer {招待コード}`、本文は multipart（`metadata` は JSON の文字列、`image` は `{ uri, name: "image.jpg", type: "image/jpeg" }`）。
+- `PUT {サーバーの URL}/v1/observations/{observation_id}`、ヘッダー `Authorization: Bearer {招待コード}`、本文は multipart（`metadata` は JSON の文字列、`image` は `{ name: "image.jpg", type: "image/jpeg", bytes }`）。
 - 打ち切りの時間は `max(60秒, 画像の大きさ ÷ 50KB/秒)`（`AbortController`）。遅い回線でも大きな画像を送りきれるようにするため（5MB なら約 100 秒）。
 - 送る前に画像の大きさを見て、10MB を超えていたら送らずに `rejected`（`last_error` に「画像が10MBを超えています」）にする。
 
@@ -166,7 +166,7 @@ interface Store {
   setStatus(id: string, status: Status): Promise<void>;
   deleteImage(id: string): Promise<void>;
 }
-type ImagePart = { uri: string; name: string; type: string } | Blob;  // 端末では前者、テストとノードでは Blob
+type ImagePart = { name: string; type: string; bytes: () => Promise<Uint8Array> } | Blob;  // 端末では前者、テストとノードでは Blob
 interface Transport {
   put(baseUrl: string, token: string, id: string, metadataJson: string, image: ImagePart, imageSize: number): Promise<Outcome>;
 }

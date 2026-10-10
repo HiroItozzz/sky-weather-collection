@@ -115,7 +115,11 @@ export const observationStore: Store = {
   async image(id) {
     const file = fileOf(id, IMAGE_NAME);
     if (!file.exists) return null;
-    return { part: { uri: file.uri, name: IMAGE_NAME, type: "image/jpeg" }, size: file.size };
+    // expo/fetch の FormData は { uri } の形を受け付けず、bytes() を持つものを読み込んで送る
+    return {
+      part: { name: IMAGE_NAME, type: "image/jpeg", bytes: () => file.bytes() },
+      size: file.size,
+    };
   },
 
   async setStatus(id, status) {

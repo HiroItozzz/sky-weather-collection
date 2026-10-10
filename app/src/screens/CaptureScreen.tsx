@@ -6,7 +6,7 @@ import Constants from "expo-constants";
 import { randomUUID } from "expo-crypto";
 import * as Device from "expo-device";
 import { createApiClient } from "../api";
-import { weatherSummary } from "../format";
+import { guessLabel, weatherSummary } from "../format";
 import type { UserGuess } from "../metadata";
 import { toTrueAzimuth } from "../orientation";
 import { pollWeather } from "../pollWeather";
@@ -176,9 +176,9 @@ export default function CaptureScreen({
     if (shootingRef.current || camera === null || !canShoot) return;
     shootingRef.current = true;
     const pressedAtMs = Date.now();
-    // 予想は押した時点で固定し、次の1枚に持ち越さないように「わからない」へ戻す
+    // 予想は押した時点で固定する。表示は保存が終わるまで選んだままにし、
+    // 保存できたら次の1枚に持ち越さないように「わからない」へ戻す
     const userGuess = guess;
-    setGuess(null);
     pollAbortRef.current?.abort();
     pollAbortRef.current = null;
     setWeatherText(null);
@@ -221,7 +221,8 @@ export default function CaptureScreen({
         },
         userGuess,
       });
-      setMessage(`保存しました（撮影 ${elapsedMs} ms）`);
+      setMessage(`保存しました（予想：${guessLabel(userGuess)}、撮影 ${elapsedMs} ms）`);
+      setGuess(null);
       // 保存の完了後に件数を数え直し、送信を始める
       warnOnFailure(queue.refresh().then(() => queue.runNow()), "撮影後の送信");
       warnOnFailure(showWeatherWhenReady(observationId), "撮影時の天気の取得");
@@ -363,6 +364,7 @@ export default function CaptureScreen({
             <Pressable
               key={option.label}
               onPress={() => setGuess(option.value)}
+              disabled={saving}
               style={[styles.guessButton, guess === option.value && styles.guessSelected]}
             >
               <Text style={styles.buttonText}>{option.label}</Text>
