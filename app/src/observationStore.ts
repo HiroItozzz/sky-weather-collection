@@ -136,7 +136,12 @@ export type SaveCaptureInput = {
   /** takePictureAsync の戻り値の uri（キャッシュの中のファイル） */
   cachedUri: string;
   pressedAtMs: number;
+  /** takePictureAsync が返った時刻 */
+  completedAtMs: number;
+  /** 撮影の窓のサンプル */
   samples: Sample[];
+  /** センサーの時計と `Date.now()` のずれ。サンプルがまだ届いていなければ null */
+  offsetMs: number | null;
   location: LocationInput | null;
   headingAccuracy: number | null;
   exif: ExifInput | null | undefined;
@@ -167,7 +172,9 @@ export async function saveCapture(input: SaveCaptureInput): Promise<ObservationM
     const metadata = buildMetadata({
       observationId: input.observationId,
       pressedAtMs: input.pressedAtMs,
+      completedAtMs: input.completedAtMs,
       samples: input.samples,
+      offsetMs: input.offsetMs,
       location: input.location,
       headingAccuracy: input.headingAccuracy,
       exif: input.exif,

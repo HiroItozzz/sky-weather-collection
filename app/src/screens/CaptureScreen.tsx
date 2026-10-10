@@ -10,7 +10,6 @@ import { guessLabel, weatherSummary } from "../format";
 import type { UserGuess } from "../metadata";
 import { toTrueAzimuth } from "../orientation";
 import { pollWeather } from "../pollWeather";
-import type { Sample } from "../record";
 import { saveCapture } from "../observationStore";
 import { loadSettings, type Settings } from "../settings";
 import type { QueueState, UploadQueue } from "../uploadQueue";
@@ -18,9 +17,9 @@ import { warnOnFailure } from "../useUploadQueue";
 import { useSensors } from "../useSensors";
 
 /** シャッターを押せる仰角の下限（度）。設計メモ 6 節 */
-export const MIN_ELEVATION_DEG = 20;
-/** 押した時刻の後ろのサンプルがそろうまで待つ時間（ミリ秒） */
-const SAMPLE_WAIT_MS = 500;
+export const MIN_ELEVATION_DEG = 15;
+/** 撮影の窓の始まり。シャッターを押した時刻よりどれだけ前か（ミリ秒）。設計メモ 9.4 節 */
+const WINDOW_BEFORE_MS = 500;
 /** この秒数より古い位置は警告を出す */
 const STALE_LOCATION_SEC = 60;
 /** 地磁気の実測が WMM の全磁力からこの割合以上ずれたら、キャリブレーションを促す */
@@ -83,12 +82,14 @@ export default function CaptureScreen({
   onOpenStats,
 }: Props) {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const { view, model, motionAvailable, locationGranted, getSamplesAround, getLatest } =
+  const { view, model, motionAvailable, locationGranted, getWindow, getLatest } =
     useSensors();
   const cameraRef = useRef<CameraView>(null);
   const [cameraReady, setCameraReady] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
+  // シャッターを押してから takePictureAsync が返るまで
+  const [capturing, setCapturing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   // 二度押しを同期的にはじくためのフラグ（状態の更新は待たない）
@@ -185,21 +186,17 @@ export default function CaptureScreen({
     setSaving(true);
     setMessage(null);
     try {
-      // 押した時刻の後ろ 0.5 秒がたったところで、前後 0.5 秒のサンプルを複製しておく。
-      // 撮影に時間がかかっても、押した瞬間のサンプルが手元の記録から消えないようにするため。
-      const samplesPromise = new Promise<Sample[]>((resolve) => {
-        setTimeout(
-          () => resolve([...getSamplesAround(pressedAtMs)]),
-          Math.max(0, pressedAtMs + SAMPLE_WAIT_MS - Date.now()),
-        );
-      });
-      const picturePromise = camera.takePictureAsync({ skipProcessing: true, exif: true }).then(
-        (result) => ({ result, elapsedMs: Date.now() - pressedAtMs }),
-      );
-      const [{ result: picture, elapsedMs }, samples] = await Promise.all([
-        picturePromise,
-        samplesPromise,
-      ]);
+      // 撮影が終わってから、押した 0.5 秒前から撮影が終わるまでのサンプル（撮影の窓）を取り出す
+      setCapturing(true);
+      let picture;
+      try {
+        picture = await camera.takePictureAsync({ skipProcessing: true, exif: true });
+      } finally {
+        setCapturing(false);
+      }
+      const completedAtMs = Date.now();
+      const elapsedMs = completedAtMs - pressedAtMs;
+      const { samples, offsetMs } = getWindow(pressedAtMs - WINDOW_BEFORE_MS, completedAtMs);
 
       const { location, headingAccuracy } = getLatest();
       const observationId = randomUUID();
@@ -207,7 +204,9 @@ export default function CaptureScreen({
         observationId,
         cachedUri: picture.uri,
         pressedAtMs,
+        completedAtMs,
         samples,
+        offsetMs,
         location,
         headingAccuracy,
         exif: picture.exif,
@@ -355,6 +354,7 @@ export default function CaptureScreen({
       </View>
 
       <View style={styles.bottom} pointerEvents="box-none">
+        {capturing ? <Text style={styles.message}>撮影中…動かさないでください</Text> : null}
         {message !== null ? <Text style={styles.message}>{message}</Text> : null}
         {weatherText !== null ? <Text style={styles.message}>{weatherText}</Text> : null}
         {hint !== null ? <Text style={styles.message}>{hint}</Text> : null}

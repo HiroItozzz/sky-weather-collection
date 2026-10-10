@@ -66,21 +66,28 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+/** 撮影が終わるまでの時間（ミリ秒） */
+const CAPTURE_DURATION_MS = 800;
+/** センサーの時計と壁時計のずれ（ミリ秒） */
+const SENSOR_OFFSET_MS = 1_790_000_000_000.4;
+
 /**
  * 縦持ち・カメラ南を向き 45° 見上げる姿勢の R（orientation.test.ts と同じ）を、
- * 押した時刻の前後 0.5 秒に数個。
+ * 押した時刻の前後 0.5 秒に数個。センサーの時計では、壁時計から SENSOR_OFFSET_MS を引いた時刻。
  */
 function knownSamples(pressedAtMs: number): Sample[] {
   const s = Math.SQRT1_2;
   const R: Mat3 = [-1, 0, 0, 0, s, s, 0, s, -s];
-  return [-400, -200, 0, 200, 400].map((dt) => ({ t: pressedAtMs + dt, R }));
+  return [-400, -200, 0, 200, 400].map((dt) => ({ tSensorMs: pressedAtMs + dt - SENSOR_OFFSET_MS, alpha: 0, beta: 0, gamma: 0, R }));
 }
 
 function makeMetadataJson(id: string, bytes: Uint8Array, pressedAtMs: number): string {
   const metadata = buildMetadata({
     observationId: id,
     pressedAtMs,
+    completedAtMs: pressedAtMs + CAPTURE_DURATION_MS,
     samples: knownSamples(pressedAtMs),
+    offsetMs: SENSOR_OFFSET_MS,
     location: {
       coords: {
         latitude: 35.6812,
@@ -101,6 +108,8 @@ function makeMetadataJson(id: string, bytes: Uint8Array, pressedAtMs: number): s
       WhiteBalance: 0,
       ImageWidth: 8,
       ImageLength: 8,
+      DateTimeOriginal: "2026:10:10 10:23:46",
+      SubSecTimeOriginal: "512",
     },
     width: 8,
     height: 8,
@@ -207,19 +216,21 @@ describeE2e("サーバーとつないだ送信", () => {
     expect(typeof body.received_at).toBe("string");
   });
 
-  it("1b. 向き・位置・カメラの全項目が null でないメタデータが受け付けられる（201）", async () => {
+  it("1b. 向き・位置・カメラ・撮影中の記録（capture）の全項目が null でないメタデータが受け付けられる（201）", async () => {
     const id = randomUUID();
     const pressedAtMs = fixedNow - 5000;
     const metadata = JSON.parse(makeMetadataJson(id, JPEG, pressedAtMs)) as Record<
       string,
       Record<string, unknown>
     >;
-    for (const key of ["orientation", "location", "camera"]) {
+    for (const key of ["orientation", "location", "camera", "capture"]) {
       expect(metadata[key]).not.toBeNull();
       for (const [name, value] of Object.entries(metadata[key])) {
         expect([key, name, value === null]).toEqual([key, name, false]);
       }
     }
+    // motion_deg は、サンプルが全部同じ向きなので 0 になる（null ではない）
+    expect(metadata.capture.motion_deg).toBe(0);
 
     const response = await createFetchTransport(nodeFetch).put(
       SERVER_URL,

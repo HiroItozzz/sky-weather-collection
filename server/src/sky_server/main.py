@@ -156,7 +156,9 @@ def create_app(
         try:
             meta = ObservationMetadata.model_validate_json(metadata)
         except ValidationError as e:
-            raise HTTPException(422, e.errors(include_url=False, include_context=False)) from e
+            raise HTTPException(
+                422, e.errors(include_url=False, include_context=False, include_input=False)
+            ) from e
         if meta.observation_id != observation_id:
             raise HTTPException(422, "metadata の observation_id がパスの ID と一致しません")
         if hashlib.sha256(data).hexdigest() != meta.image_sha256:

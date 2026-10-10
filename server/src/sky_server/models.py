@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # 小文字に正規化する前の UUID の形式（ハイフン付きの36文字）
 UUID_PATTERN = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -91,6 +91,39 @@ class Device(_Strict):
     app_version: str
 
 
+class OrientationTrace(_Strict):
+    source: Annotated[str, Field(min_length=1, max_length=200)]
+    # 同じ添字が1件のサンプル。Firestore は配列の中に配列を入れられないので、項目ごとの配列にする
+    t_sensor_ms: Annotated[list[Float], Field(max_length=1000)]
+    alpha: Annotated[list[Float], Field(max_length=1000)]
+    beta: Annotated[list[Float], Field(max_length=1000)]
+    gamma: Annotated[list[Float], Field(max_length=1000)]
+
+    @model_validator(mode="after")
+    def _same_length(self) -> "OrientationTrace":
+        lengths = {len(self.t_sensor_ms), len(self.alpha), len(self.beta), len(self.gamma)}
+        if len(lengths) != 1:
+            raise ValueError("t_sensor_ms・alpha・beta・gamma の長さがそろっていない")
+        return self
+
+
+class Capture(_Strict):
+    pressed_at: AwareDatetime
+    completed_at: AwareDatetime
+    duration_ms: Annotated[int, Field(ge=0, le=600000)]
+    motion_deg: Annotated[float, Field(ge=0, le=180, allow_inf_nan=False)] | None
+    sensor_clock_offset_ms: Float | None
+    exif_datetime_original: Annotated[str, Field(max_length=64)] | None
+    exif_subsec_time_original: Annotated[str, Field(max_length=64)] | None
+    orientation_trace: OrientationTrace | None
+
+    @model_validator(mode="after")
+    def _completed_after_pressed(self) -> "Capture":
+        if self.completed_at < self.pressed_at:
+            raise ValueError("completed_at が pressed_at より前になっている")
+        return self
+
+
 class ObservationMetadata(_Strict):
     schema_version: Literal[1]
     observation_id: Annotated[str, Field(pattern=UUID_PATTERN)]
@@ -103,6 +136,8 @@ class ObservationMetadata(_Strict):
     capture_path: Literal["native", "web"]
     user_guess: Literal["rain", "no_rain"] | None
     image_sha256: Annotated[str, Field(pattern=SHA256_PATTERN)]
+    # 古いアプリは送らないので、キーがなくてもよい唯一の項目
+    capture: Capture | None = None
 
     @field_validator("observation_id", "image_sha256")
     @classmethod
