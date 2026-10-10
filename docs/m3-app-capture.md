@@ -290,7 +290,10 @@ SKY_E2E_URL=http://127.0.0.1:8000 SKY_E2E_TOKEN=<招待コード> npm run test:e
   "exif_subsec_time_original": "512",
   "orientation_trace": {
     "source": "expo-sensors DeviceMotion rotation (alpha, beta, gamma)",
-    "samples": [[123456789.0, 0.12, 1.45, -0.03], ...]
+    "t_sensor_ms": [123456789.0, 123456809.0, ...],
+    "alpha": [0.12, 0.12, ...],
+    "beta": [1.45, 1.46, ...],
+    "gamma": [-0.03, -0.03, ...]
   }
 }
 ```
@@ -303,9 +306,11 @@ SKY_E2E_URL=http://127.0.0.1:8000 SKY_E2E_TOKEN=<招待コード> npm run test:e
 | `sensor_clock_offset_ms` | 9.3 の `offsetMs`。まだサンプルが届いていなければ null |
 | `exif_datetime_original` / `exif_subsec_time_original` | 写真の EXIF の `DateTimeOriginal`・`SubSecTimeOriginal` を、そのままの文字列で（なければ null）。露光の時刻を割り出せるか、あとで調べるため |
 | `orientation_trace.source` | サンプルの出どころ（文字列、200 文字まで） |
-| `orientation_trace.samples` | 撮影の窓のサンプル。1件は `[tSensorMs, alpha, beta, gamma]`（ミリ秒・ラジアン）。時刻の古い順。最大 1000 件 |
+| `orientation_trace.t_sensor_ms` / `alpha` / `beta` / `gamma` | 撮影の窓のサンプルを、項目ごとの配列で持つ（同じ添字が1件のサンプル。ミリ秒・ラジアン）。時刻の古い順。4つの配列は同じ長さで、最大 1000 件。Firestore は配列の中に配列を入れられないため、`[[t, a, b, g], ...]` の形にはしない |
 
 - `orientation_trace` は、撮影の窓のサンプルがなければ null。
+- 窓のサンプルが 1000 件を超えたら、最初と最後を含めて等間隔に間引いて 1000 件にする（センサーが指定より速く届く端末でも、422 で送れなくならないように）。
+- 撮影中に `Date.now()` が巻き戻ると `completed_at` が `pressed_at` より前になる。そのときは `completedAtMs = pressedAtMs` とみなす（422 で送れなくならないように）。
 - 角度に直す前の値を残すのは、露光の時刻があとでわかったときに、どのサンプルを使うかを選び直し、同じ計算で向きを求め直せるようにするため。
 - サーバーは保存するだけで、`motion_deg` などで受け付けを判断しない。学習で使う基準（例：10° 未満はそのまま、10〜30° は印、30° 以上は向きを欠損扱い）は、データが溜まってから分布を見て決める。
 
@@ -318,4 +323,5 @@ SKY_E2E_URL=http://127.0.0.1:8000 SKY_E2E_TOKEN=<招待コード> npm run test:e
   - `motion_deg`：0 以上 180 以下、または null。
   - `sensor_clock_offset_ms`：有限の数、または null。
   - `exif_datetime_original`・`exif_subsec_time_original`：64 文字までの文字列、または null。
-  - `orientation_trace`：null、または `{source: 1〜200 文字, samples: 0〜1000 件の [有限の数 ×4]}`。
+  - `orientation_trace`：null、または `{source: 1〜200 文字, t_sensor_ms・alpha・beta・gamma: 有限の数の配列（0〜1000 件、4つとも同じ長さ）}`。
+- 検証に失敗したときの 422 の応答には、送られた値（pydantic の `input`）を含めない。NaN などの値が入っていると応答を JSON にできず 500 になるため。
