@@ -155,8 +155,14 @@ git clone https://github.com/HiroItozzz/sky-weather-collection.git
 Cloud Run の URL は `https://{サービス名}-{プロジェクト番号}.{リージョン}.run.app` の形で、デプロイの前に決まる。アプリは起動時に内部 API の URL を必要とするので、先に組み立てておく。`~/sky-env.sh` に足して、読み込み直す。
 
 ```sh
+# プロジェクト番号はここで一度だけ取り、確定した値をファイルに書く
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+echo "$PROJECT_NUMBER"   # 数字が表示されることを確かめる。空なら、ここで止めて原因を調べる
+```
+
+```sh
+echo "export PROJECT_NUMBER=$PROJECT_NUMBER" >> ~/sky-env.sh
 cat >> ~/sky-env.sh <<'EOF'
-export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
 export SERVICE_URL=https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app
 export TASKS_URL=${SERVICE_URL}/internal/tasks/fetch-weather
 EOF
@@ -266,14 +272,14 @@ cd ~/sky-weather-collection/server && uv run python -m sky_server.admin rebuild-
 Artifact Registry には、デプロイのたびにイメージが残る。無料枠（0.5GB、要確認）を超えないように、古いイメージを消す設定を入れておく。
 
 ```sh
-cat > cleanup-policy.json <<'JSON'
+cat > ~/cleanup-policy.json <<'JSON'
 [
   {"name": "keep-latest-3", "action": {"type": "Keep"}, "mostRecentVersions": {"keepCount": 3}},
   {"name": "delete-old", "action": {"type": "Delete"}, "condition": {"olderThan": "7d"}}
 ]
 JSON
 gcloud artifacts repositories set-cleanup-policies cloud-run-source-deploy \
-  --location=$REGION --policy=cleanup-policy.json --no-dry-run
+  --location=$REGION --policy=$HOME/cleanup-policy.json --no-dry-run
 ```
 
 ## 8. 無料枠と費用の目安（要確認）

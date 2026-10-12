@@ -9,17 +9,19 @@ GCP の初回の準備（`docs/deploy-gcp.md` の 0〜6節）が終わってい�
 | 段階 | 内容 |
 |---|---|
 | きっかけ | `v*` のタグの push だけ。ブランチへの push や PR では出さない |
+| 出してよいコミットか | タグの指すコミットが `main` に含まれていなければ止める（作業ブランチに打ったタグからは出さない）。誤操作を防ぐための検査で、守りではない（1.1節） |
 | テスト | `ci.yml` を同じワークフローから呼ぶ（`workflow_call`）。落ちたらデプロイしない |
-| 出してよいコミットか | タグの指すコミットが `main` に含まれていなければ止める（作業ブランチに打ったタグからは出さない） |
 | GCP への認証 | Workload Identity 連携。GitHub が発行する一時的な ID トークンを GCP が信頼し、サービスアカウント `sky-deployer` として動く。鍵ファイル（JSON）は作らない |
 | ビルド | Actions の中で `docker build`（`server/Dockerfile`）し、Artifact Registry の `sky` リポジトリに、コミットの SHA をタグにして push する |
 | デプロイ | `gcloud run deploy --image` のあと、トラフィックを新しいリビジョンに全部向ける（`update-traffic --to-latest`）。環境変数やインスタンス数などの設定は前のリビジョンのものが引き継がれる。GitHub の Environment `staging` として記録される（初回に自動で作られる） |
 | 確認 | デプロイ後に `GET /health` が 200 を返すか確かめる |
 
-### 1.1 認証の条件（二重に絞る）
+### 1.1 誰がデプロイできるか
 
 - GCP 側（プロバイダの属性条件）：トークンの `repository_id` がこのリポジトリの ID（`1214255489`）で、`ref` が `refs/tags/v` で始まるときだけ受け付ける。リポジトリ名ではなく ID で見るのは、名前が変わったり、同じ名前のリポジトリが作り直されたりしても、別のリポジトリを信頼しないため。
-- GitHub 側（ワークフロー）：上の「出してよいコミットか」の検査。
+- タグの push で動くワークフローは、タグの指すコミットにある `.github/workflows/` のもの。そのため、書き込み権限のある人は、検査を消したワークフローのコミットに `v` のタグを打てば、検査を通らずにデプロイできる。「main に含まれるか」の検査は誤操作を防ぐためのもので、守りにはならない。
+- 本当の守りは「`v*` のタグを作れる人」。GitHub のタグのルールセット（2.4節）で、`v*` のタグの作成・更新・削除をリポジトリの持ち主だけに絞る。更新と削除も禁止するので、同じタグを別のコミットに付け替えて出し直すこともできなくなる。
+- main の古いコミットにタグを打つと、古いコードが出る（検査は「main に含まれるか」しか見ない）。タグは `main` の最新のコミットに打つ。
 
 ### 1.2 `sky-deployer` の権限
 
@@ -29,7 +31,7 @@ GCP の初回の準備（`docs/deploy-gcp.md` の 0〜6節）が終わってい�
 | Cloud Run のサービス `sky-server` | `roles/run.developer` | 新しいリビジョンを出す |
 | サービスアカウント `sky-server` | `roles/iam.serviceAccountUser` | `sky-server` として動くリビジョンを出す |
 
-- プロジェクト全体のロールは付けない。Firestore や Cloud Storage のデータには触れない。
+- プロジェクト全体のロールは付けない。`sky-deployer` 自身は Firestore や Cloud Storage を直接読み書きできない。ただし `sky-server` として動くコードを出せるので、実質的には `sky-server` と同じ範囲（Firestore、バケット、キュー、`sky-tasks` の名前での OIDC トークン）に届く。`sky-deployer` を使える人を絞ること（1.1節）が、データを守ることになる。
 - `sky-deployer` を使えるのは、1.1節の条件を満たす GitHub のワークフローだけ（`roles/iam.workloadIdentityUser`）。
 
 ## 2. GCP の準備（1回だけ）
@@ -57,14 +59,14 @@ gcloud artifacts repositories create $AR_REPO \
   --description="sky-server のイメージ（CD）"
 
 # 古いイメージを消す（無料枠 0.5GB を超えないように。新しい3つは残す）
-cat > cleanup-policy.json <<'JSON'
+cat > ~/cleanup-policy.json <<'JSON'
 [
   {"name": "keep-latest-3", "action": {"type": "Keep"}, "mostRecentVersions": {"keepCount": 3}},
   {"name": "delete-old", "action": {"type": "Delete"}, "condition": {"olderThan": "7d"}}
 ]
 JSON
 gcloud artifacts repositories set-cleanup-policies $AR_REPO \
-  --location=$REGION --policy=cleanup-policy.json --no-dry-run
+  --location=$REGION --policy=$HOME/cleanup-policy.json --no-dry-run
 ```
 
 ### 2.2 サービスアカウントと権限
@@ -107,6 +109,22 @@ gcloud iam workload-identity-pools providers describe sky-weather-collection \
 
 最後に表示される `projects/{プロジェクト番号}/locations/global/workloadIdentityPools/github/providers/sky-weather-collection` を、`deploy.yml` の `WIF_PROVIDER` に書く。秘密の値ではないので、ワークフローにそのまま書いてよい。
 
+### 2.4 タグのルールセット（GitHub）
+
+GitHub のリポジトリの Settings → Rules → Rulesets → New ruleset → New tag ruleset で作る。
+
+- Ruleset name：`release-tags`
+- Enforcement status：Active
+- Bypass list：Repository admin（リポジトリの持ち主）を足す
+- Target tags：Add target → Include by pattern → `v*`
+- Rules：Restrict creations、Restrict updates、Restrict deletions にチェックを入れる
+
+これで、`v*` のタグを作れるのは持ち主だけになり、作ったタグは付け替えも削除もできなくなる。
+
+### 2.5 プロジェクト ID を変えたとき
+
+`sky-weather-stg` 以外のプロジェクト ID にしたときは、`deploy.yml` の `env` の `PROJECT_ID`、`IMAGE`、`WIF_PROVIDER`、`DEPLOY_SA` をすべて直す。
+
 ## 3. 使い方
 
 `main` に入ったコミットにタグを打って push する。
@@ -119,12 +137,12 @@ git push origin v0.1.0
 ```
 
 - 進み具合は GitHub の Actions タブで見る。
-- タグの名前は `v{大}.{中}.{小}` にする。同じタグは2回使えない。出し直すときは番号を上げる。
+- タグの名前は `v{大}.{中}.{小}` にする。同じタグは2回使えない（2.4節のルールセットで付け替えと削除を禁止している）。出し直すときは番号を上げる。
 - 動いているイメージがどのコミットのものかは、`gcloud run services describe $SERVICE --region=$REGION --format='value(spec.template.spec.containers[0].image)'` の末尾（コミットの SHA）で分かる。
 
 ### 3.1 元に戻す
 
-前のリビジョンにトラフィックを戻す。
+前のリビジョンにトラフィックを戻す。2.1節の掃除の設定で古いイメージは消えるので、戻せるのはイメージが残っている直近の3つまで。
 
 ```sh
 gcloud run revisions list --service=$SERVICE --region=$REGION
@@ -137,4 +155,4 @@ gcloud run services update-traffic $SERVICE --region=$REGION --to-revisions={戻
 
 - 認証（`google-github-actions/auth`）で失敗する：プロバイダの名前、属性条件（タグが `v` で始まっているか）、`workloadIdentityUser` の付け先を確かめる。
 - デプロイで権限のエラーになる：エラーに出る権限を確かめる。サービス単位の `run.developer` で足りない操作が求められたときは、何の権限かを確かめてから、必要な範囲だけ足す。
-- 「タグが main に含まれていない」で止まる：タグを消して（`git push origin :refs/tags/v0.1.0`、`git tag -d v0.1.0`）、`main` のコミットに打ち直す。
+- 「タグが main に含まれていない」で止まる：ルールセットでタグは消せないので、手元のタグだけ消して（`git tag -d v0.1.0`）、番号を上げたタグを `main` のコミットに打ち直す。

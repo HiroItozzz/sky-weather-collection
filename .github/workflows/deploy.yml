@@ -9,11 +9,7 @@ on:
 permissions:
   contents: read
 
-# デプロイが重ならないようにする（途中のものは止めずに、終わってから次を始める）
-concurrency:
-  group: deploy-staging
-  cancel-in-progress: false
-
+# プロジェクト ID を変えたときは、この4つをすべて直す（docs/cd.md 2節）
 env:
   PROJECT_ID: sky-weather-stg
   REGION: asia-northeast1
@@ -24,21 +20,14 @@ env:
   DEPLOY_SA: sky-deployer@sky-weather-stg.iam.gserviceaccount.com
 
 jobs:
-  ci:
-    uses: ./.github/workflows/ci.yml
-
-  deploy:
-    needs: ci
+  # 誤操作の防止。タグを push できる人なら、このワークフローごと書き換えられるので、
+  # 守りはタグのルールセットで行う（docs/cd.md 1.1節）
+  check-tag:
     runs-on: ubuntu-latest
-    environment: staging
-    permissions:
-      contents: read
-      id-token: write # Workload Identity 連携で GitHub の ID トークンを取るため
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: タグが main のコミットを指しているか確かめる
         run: |
           git fetch origin main
@@ -47,12 +36,32 @@ jobs:
             exit 1
           fi
 
-      - uses: google-github-actions/auth@v3
+  ci:
+    needs: check-tag
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: staging
+    # デプロイが重ならないようにする。待っている run は最新の1つだけが残る
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # Workload Identity 連携で GitHub の ID トークンを取るため
+    steps:
+      - uses: actions/checkout@v4
+
+      # ID トークンを扱うアクションは、コミットの SHA で固定する
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
+          project_id: ${{ env.PROJECT_ID }}
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.DEPLOY_SA }}
 
-      - uses: google-github-actions/setup-gcloud@v3
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       - name: イメージをビルドして push する
         run: |
