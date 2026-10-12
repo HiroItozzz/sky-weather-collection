@@ -181,7 +181,7 @@ echo $SERVICE_URL
 ## 6. 動作の確認
 
 ```sh
-curl -i $SERVICE_URL/healthz                       # 200 {"status":"ok"}
+curl -i $SERVICE_URL/health                       # 200 {"status":"ok"}
 curl -i -X POST $TASKS_URL -H 'Content-Type: application/json' -d '{"job_id":"x"}'   # 401
 ```
 

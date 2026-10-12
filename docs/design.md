@@ -121,7 +121,7 @@ ml/          学習用のコードとノートブック
   - 新規なら 201、同じ内容がすでにあれば 200、同じ ID で中身が違えば 409 を返す。
 - `GET /v1/observations/{observation_id}`：端末が、送信済みかどうかを確認するために使う。
 - `POST /internal/tasks/fetch-weather`：Cloud Tasks から呼ばれる。OIDC で認証する。
-- `GET /healthz`：死活確認用。
+- `GET /health`：死活確認用。Cloud Run は `z` で終わる一部のパス（`/healthz` など）を予約していてアプリに届かないため、`/healthz` は使わない。
 
 ### 認証
 
@@ -247,7 +247,7 @@ M1 では、7節の API のうち天気データの取得以外を、ローカ�
 - 自分の観測なら `{"observation_id": "...", "received_at": "..."}` を返す。
 - 存在しないとき、または他人の観測のときは、どちらも 404 を返す（他人の ID が存在するかどうかを漏らさないため）。
 
-### `GET /healthz`
+### `GET /health`
 
 - 認証なしで `{"status": "ok"}` を返す。
 

@@ -130,8 +130,8 @@ def create_app(
         reserve_weather_jobs(existing)
         return response
 
-    @app.get("/healthz")
-    def healthz() -> dict:
+    @app.get("/health")
+    def health() -> dict:
         return {"status": "ok"}
 
     # 保存先（Firestore、Cloud Tasks など）は同期のクライアントなので、async にせず
