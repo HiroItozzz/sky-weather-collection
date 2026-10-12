@@ -1,0 +1,72 @@
+# v で始まるタグの push で、テストを流してからステージングの Cloud Run に出す。
+# 仕組みと GCP 側の準備は docs/cd.md にある。
+name: Deploy (staging)
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+# デプロイが重ならないようにする（途中のものは止めずに、終わってから次を始める）
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: sky-weather-stg
+  REGION: asia-northeast1
+  SERVICE: sky-server
+  IMAGE: asia-northeast1-docker.pkg.dev/sky-weather-stg/sky/sky-server
+  # docs/cd.md 2.3節の最後のコマンドで表示される値
+  WIF_PROVIDER: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github/providers/sky-weather-collection
+  DEPLOY_SA: sky-deployer@sky-weather-stg.iam.gserviceaccount.com
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write # Workload Identity 連携で GitHub の ID トークンを取るため
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: タグが main のコミットを指しているか確かめる
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::タグ ${GITHUB_REF_NAME} の指すコミットが main に含まれていません"
+            exit 1
+          fi
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: イメージをビルドして push する
+        run: |
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "${IMAGE}:${GITHUB_SHA}" server
+          docker push "${IMAGE}:${GITHUB_SHA}"
+
+      - name: デプロイする
+        run: |
+          gcloud run deploy "$SERVICE" --image="${IMAGE}:${GITHUB_SHA}" --region="$REGION" --quiet
+          # 手で古いリビジョンに戻していた場合も、新しいリビジョンに戻す
+          gcloud run services update-traffic "$SERVICE" --region="$REGION" --to-latest --quiet
+
+      - name: 動いているか確かめる
+        run: |
+          url=$(gcloud run services describe "$SERVICE" --region="$REGION" --format='value(status.url)')
+          curl -fsS --retry 5 --retry-delay 3 "${url}/health"
