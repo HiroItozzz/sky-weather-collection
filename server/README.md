@@ -159,7 +159,7 @@ curl -i -X POST http://localhost:8000/internal/tasks/fetch-weather \
 `SKY_BACKEND=gcp` にすると、保存先を Firestore と Cloud Storage、実行の予約を Cloud Tasks に切り替えて動く（既定は `local`）。内部 API の認証は `SKY_TASK_AUTH=oidc` で Cloud Tasks の OIDC トークンを検証する。必要な設定（`SKY_GCP_PROJECT`、`SKY_GCS_BUCKET`、`SKY_TASKS_TARGET_URL`、`SKY_TASKS_SERVICE_ACCOUNT` など）は `docs/m4-weather.md` の 10節にある。
 
 - `run-due-jobs` は GCP 版では使えない（Cloud Tasks が実行する）。
-- 撮影者の作成は、手元の PC から `SKY_BACKEND=gcp` を付けて `admin create-user` を実行する。
+- 撮影者の作成は、Cloud Shell から `SKY_BACKEND=gcp` を付けて `admin create-user` を実行する（`docs/deploy-gcp.md` 6節）。
 
 構築とデプロイの手順は `docs/deploy-gcp.md` を見る。
 

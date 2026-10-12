@@ -51,7 +51,7 @@ def get_daily_upload_limit() -> int:
 
 
 BACKENDS = ("local", "gcp")
-DEFAULT_TASKS_LOCATION = "us-central1"
+DEFAULT_TASKS_LOCATION = "asia-northeast1"
 DEFAULT_TASKS_QUEUE = "weather-fetch"
 
 
