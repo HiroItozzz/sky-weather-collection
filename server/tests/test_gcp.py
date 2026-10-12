@@ -149,7 +149,9 @@ def test_firestore_1日の件数は記録がなければ0で増やすたびに1�
 
 def test_firestore_天気ジョブの用意がそのまま動く():
     jobs = FirestoreJobRepository(FakeFirestoreClient())
-    tasks = CloudTasksScheduler("p", "us-central1", "q", URL, SERVICE_ACCOUNT, FakeTasksClient())
+    tasks = CloudTasksScheduler(
+        "p", "asia-northeast1", "q", URL, SERVICE_ACCOUNT, FakeTasksClient()
+    )
     meta = ObservationMetadata.model_validate(make_metadata())
     record = meta.with_server_fields("u1", RUN_AT, "key.jpg")
     observations = FirestoreObservationRepository(FakeFirestoreClient())
@@ -276,13 +278,15 @@ def test_ローカル_不正な接頭辞はエラーで何も消さない(tmp_pa
 
 
 def make_scheduler(client: FakeTasksClient) -> CloudTasksScheduler:
-    return CloudTasksScheduler("proj", "us-central1", "weather-fetch", URL, SERVICE_ACCOUNT, client)
+    return CloudTasksScheduler(
+        "proj", "asia-northeast1", "weather-fetch", URL, SERVICE_ACCOUNT, client
+    )
 
 
 def test_tasks_作るタスクの中身():
     client = FakeTasksClient()
     make_scheduler(client).schedule("o1_label", RUN_AT)
-    queue = "projects/proj/locations/us-central1/queues/weather-fetch"
+    queue = "projects/proj/locations/asia-northeast1/queues/weather-fetch"
     name = f"{queue}/tasks/o1_label-{int(RUN_AT.timestamp())}"
     task = client.tasks[name]
     assert task["parent"] == queue
@@ -439,7 +443,7 @@ def test_必須の値が足りなければ足りない名前をすべて示す(g
 
 def test_GCPの設定の既定値(gcp_env):
     settings = get_gcp_settings()
-    assert settings.tasks_location == "us-central1"
+    assert settings.tasks_location == "asia-northeast1"
     assert settings.tasks_queue == "weather-fetch"
 
 

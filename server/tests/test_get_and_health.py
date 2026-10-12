@@ -1,8 +1,8 @@
 from conftest import OBSERVATION_ID
 
 
-def test_healthzは認証なしでokを返す(api):
-    res = api.client.get("/healthz")
+def test_healthは認証なしでokを返す(api):
+    res = api.client.get("/health")
     assert res.status_code == 200
     assert res.json() == {"status": "ok"}
 

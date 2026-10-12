@@ -2,25 +2,30 @@
 
 サーバー（`server/`）を Cloud Run に置き、Firestore、Cloud Storage、Cloud Tasks を使う手順。仕様は `docs/m4-weather.md` の 10節にある。
 
-- コマンドはすべて手元の PC で、`gcloud` を使って実行する。
-- リージョンはすべて `us-central1` にする。Cloud Storage の常時無料枠が、米国の一部のリージョンだけで使えるため。日本からのアップロードが少し遅くなるが、写真1枚の送信なので問題にならない。
+- コマンドはすべて Cloud Shell で、`gcloud` を使って実行する。手元の PC の gcloud の設定や ADC（アプリケーションのデフォルト認証情報）が、他のプロジェクトのものと混ざらないようにするため。
+- リージョンはすべて `asia-northeast1`（東京）にする。日本の利用者に近いため。また、Firestore の場所は後から変えられないため。Cloud Storage の常時無料枠は米国の一部のリージョンだけなので、東京では付かない（Standard の保存は 1GB あたり月に数円程度、要確認）。
 - 無料枠と料金は変わることがある。この手順書の値は書いた時点（2026-10）の理解で、確かめていないものには「要確認」と書いた。始める前と、運用を始めて1か月後に、公式のページと請求額を確認する（8節）。
 
 ## 0. 準備
 
-- `gcloud` をインストールし、`gcloud auth login` でログインしておく。
+- Cloud Shell（https://shell.cloud.google.com）を開く。`gcloud` は入っていて、ログイン済みの Google アカウントで使える。
 - 請求先アカウント（クレジットカードを登録したもの）が必要。無料枠の範囲で使う場合でも、請求先アカウントを紐づけないと Cloud Run などを有効にできない。
-- 以下の変数を、作業するシェルで設定しておく。
+- 以下の変数を `~/sky-env.sh` に書いて、`source` で読み込む。Cloud Shell は切れると、シェルの変数が消える。ホームディレクトリは残るので、ファイルに書いておけば、開き直したあとも `source ~/sky-env.sh` で元に戻せる。
 
 ```sh
-export PROJECT_ID=sky-weather-collection   # 取れなければ末尾に数字を付ける（例：sky-weather-collection-1）
-export REGION=us-central1
+cat > ~/sky-env.sh <<'EOF'
+export PROJECT_ID=sky-weather-stg   # ステージング。取れなければ末尾に数字を付ける（例：sky-weather-stg-1）
+export REGION=asia-northeast1
 export SERVICE=sky-server
 export BUCKET=${PROJECT_ID}-sky-data
 export QUEUE=weather-fetch
 export RUN_SA=sky-server@${PROJECT_ID}.iam.gserviceaccount.com     # Cloud Run が動くときのアカウント
 export TASKS_SA=sky-tasks@${PROJECT_ID}.iam.gserviceaccount.com    # Cloud Tasks が内部 API を呼ぶときのアカウント
+EOF
+source ~/sky-env.sh
 ```
+
+- 5節・6節で使う変数は、あとで同じファイルに足していく。Cloud Shell を開き直したら、最初に `source ~/sky-env.sh` を実行する。
 
 ## 1. プロジェクトと予算アラート
 
@@ -136,20 +141,38 @@ gcloud iam service-accounts add-iam-policy-binding $TASKS_SA \
 - 権限は、必要なものだけをできるだけ狭い範囲に付けている。プロジェクト全体の編集者などは付けない。
 - `sky-tasks` には権限を何も付けない。内部 API は、トークンのメールが `sky-tasks` であることをアプリで確かめる（`docs/m4-weather.md` 10.6節）。
 
-## 5. デプロイ
+### リポジトリを取る
 
-Cloud Run の URL は `https://{サービス名}-{プロジェクト番号}.{リージョン}.run.app` の形で、デプロイの前に決まる。アプリは起動時に内部 API の URL を必要とするので、先に組み立てておく。
+デプロイするコードを Cloud Shell に取っておく（ホームディレクトリに置く）。
 
 ```sh
-export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+cd ~
+git clone https://github.com/HiroItozzz/sky-weather-collection.git
+```
+
+## 5. デプロイ
+
+Cloud Run の URL は `https://{サービス名}-{プロジェクト番号}.{リージョン}.run.app` の形で、デプロイの前に決まる。アプリは起動時に内部 API の URL を必要とするので、先に組み立てておく。`~/sky-env.sh` に足して、読み込み直す。
+
+```sh
+# プロジェクト番号はここで一度だけ取り、確定した値をファイルに書く
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+echo "$PROJECT_NUMBER"   # 数字が表示されることを確かめる。空なら、ここで止めて原因を調べる
+```
+
+```sh
+echo "export PROJECT_NUMBER=$PROJECT_NUMBER" >> ~/sky-env.sh
+cat >> ~/sky-env.sh <<'EOF'
 export SERVICE_URL=https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app
 export TASKS_URL=${SERVICE_URL}/internal/tasks/fetch-weather
+EOF
+source ~/sky-env.sh
 ```
 
 `server/` に移動してデプロイする。`--source .` で、Cloud Build が `server/Dockerfile` からイメージを作る。
 
 ```sh
-cd server
+cd ~/sky-weather-collection/server
 gcloud run deploy $SERVICE \
   --source . \
   --region=$REGION \
@@ -176,24 +199,34 @@ gcloud run services describe $SERVICE --region=$REGION --format='value(status.ur
 echo $SERVICE_URL
 ```
 
-違っていたら、`TASKS_URL` を表示された URL で作り直し、`gcloud run services update $SERVICE --region=$REGION --update-env-vars=SKY_TASKS_TARGET_URL=$TASKS_URL` を実行する。
+違っていたら、`~/sky-env.sh` の `SERVICE_URL` を表示された URL に書き換えて読み込み直し、`gcloud run services update $SERVICE --region=$REGION --update-env-vars=SKY_TASKS_TARGET_URL=$TASKS_URL` を実行する。
 
 ## 6. 動作の確認
 
 ```sh
-curl -i $SERVICE_URL/healthz                       # 200 {"status":"ok"}
+curl -i $SERVICE_URL/health                       # 200 {"status":"ok"}
+curl -i $SERVICE_URL/docs                         # 404（GCP では API の説明ページを出さない）
 curl -i -X POST $TASKS_URL -H 'Content-Type: application/json' -d '{"job_id":"x"}'   # 401
 ```
 
-撮影者は手元の PC から作る。手元の認証情報で Firestore に書くので、先にログインしておく。
+撮影者も Cloud Shell から作る。管理コマンドは `uv` で動かす。Cloud Shell には `uv` が最初から入っている（`uv --version` で確かめる）。入っていなければ `curl -LsSf https://astral.sh/uv/install.sh | sh` で入れて、シェルを開き直す。
+
+管理コマンドが Firestore などに届くように、設定を `~/sky-env.sh` に足して、読み込み直す。`GOOGLE_CLOUD_QUOTA_PROJECT` は、API の利用量をこのプロジェクトに付けるための設定。Cloud Shell ではログイン済みの認証情報が使われるので、`gcloud auth application-default login` は要らない。
 
 ```sh
-gcloud auth application-default login
-cd server
-SKY_BACKEND=gcp SKY_GCP_PROJECT=$PROJECT_ID SKY_GCS_BUCKET=$BUCKET \
-SKY_TASKS_LOCATION=$REGION SKY_TASKS_QUEUE=$QUEUE \
-SKY_TASKS_TARGET_URL=$TASKS_URL SKY_TASKS_SERVICE_ACCOUNT=$TASKS_SA \
-  uv run python -m sky_server.admin create-user --name alice
+cat >> ~/sky-env.sh <<'EOF'
+export SKY_BACKEND=gcp
+export SKY_GCP_PROJECT=$PROJECT_ID
+export SKY_GCS_BUCKET=$BUCKET
+export SKY_TASKS_LOCATION=$REGION
+export SKY_TASKS_QUEUE=$QUEUE
+export SKY_TASKS_TARGET_URL=$TASKS_URL
+export SKY_TASKS_SERVICE_ACCOUNT=$TASKS_SA
+export GOOGLE_CLOUD_QUOTA_PROJECT=$PROJECT_ID
+EOF
+source ~/sky-env.sh
+
+cd ~/sky-weather-collection/server && uv run python -m sky_server.admin create-user --name alice
 ```
 
 表示された招待コードで、`server/README.md` の curl の例（`http://localhost:8000` を `$SERVICE_URL` に変える）を使って1件アップロードする。
@@ -214,9 +247,10 @@ gcloud run services logs read $SERVICE --region=$REGION --limit=50
 
 ### 撮影者のデータを消す
 
-データの削除を頼まれたときは、手元の PC から（撮影者の作成と同じ環境変数を付けて）`delete-user` を実行する。
+データの削除を頼まれたときは、Cloud Shell から（`source ~/sky-env.sh` を済ませて）`delete-user` を実行する。
 
 ```sh
+cd ~/sky-weather-collection/server
 uv run python -m sky_server.admin delete-user --user-id <user_id> --yes
 # 10分以上おいて、もう一度実行する（実行中だった天気ジョブの書き戻しも消して、撮影者を消す）
 uv run python -m sky_server.admin delete-user --user-id <user_id> --yes
@@ -224,26 +258,28 @@ uv run python -m sky_server.admin delete-user --user-id <user_id> --yes
 
 ## 7. 更新
 
+通常の更新は `docs/cd.md` の CD（タグの push でデプロイ）で行う。ここは手で出すときの手順。
+
 コードを変えたら、5節の `gcloud run deploy` を同じ引数でもう一度実行する（環境変数は前回の値が残るので、`--set-env-vars` は省いてもよい）。
 
-デプロイで保存の形が変わったときは、古いリビジョンへのトラフィックがなくなってから、手元の PC から（撮影者の作成と同じ環境変数を付けて）`rebuild-summaries` を1回実行する。M5 の初回のデプロイでは必ず実行する（`captured_at_utc` がない古い観測は、タイムラインの一覧に出ないため）。
+デプロイで保存の形が変わったときは、古いリビジョンへのトラフィックがなくなってから、Cloud Shell から（`source ~/sky-env.sh` を済ませて）`rebuild-summaries` を1回実行する。M5 の初回のデプロイでは必ず実行する（`captured_at_utc` がない古い観測は、タイムラインの一覧に出ないため）。
 
 ```sh
 gcloud run revisions list --service=$SERVICE --region=$REGION   # 古いリビジョンのトラフィックが 0% になったことを確かめる
-uv run python -m sky_server.admin rebuild-summaries
+cd ~/sky-weather-collection/server && uv run python -m sky_server.admin rebuild-summaries
 ```
 
 Artifact Registry には、デプロイのたびにイメージが残る。無料枠（0.5GB、要確認）を超えないように、古いイメージを消す設定を入れておく。
 
 ```sh
-cat > cleanup-policy.json <<'JSON'
+cat > ~/cleanup-policy.json <<'JSON'
 [
   {"name": "keep-latest-3", "action": {"type": "Keep"}, "mostRecentVersions": {"keepCount": 3}},
   {"name": "delete-old", "action": {"type": "Delete"}, "condition": {"olderThan": "7d"}}
 ]
 JSON
 gcloud artifacts repositories set-cleanup-policies cloud-run-source-deploy \
-  --location=$REGION --policy=cleanup-policy.json --no-dry-run
+  --location=$REGION --policy=$HOME/cleanup-policy.json --no-dry-run
 ```
 
 ## 8. 無料枠と費用の目安（要確認）
@@ -254,17 +290,17 @@ gcloud artifacts repositories set-cleanup-policies cloud-run-source-deploy \
 |---|---|---|
 | Cloud Run | リクエスト 200万件、vCPU と メモリの使用時間に枠あり | 1件のアップロードで、PUT 1回と内部 API 2回以上 |
 | Firestore | 1日あたり 読み取り 5万、書き込み 2万、削除 2万、保存 1GiB（`(default)` のみ） | 1件あたり書き込み 10回前後 |
-| Cloud Storage | Standard の保存 5GB（`us-central1` などの米国の一部リージョンのみ）、書き込みなどの操作 5,000回、読み取りの操作 5万回 | 1件あたり画像 数MB と天気データ 100KB 未満 |
+| Cloud Storage | Standard の保存 5GB、書き込みなどの操作 5,000回、読み取りの操作 5万回（いずれも米国の一部リージョンのみ。`asia-northeast1` では付かない） | 1件あたり画像 数MB と天気データ 100KB 未満 |
 | Cloud Tasks | 100万オペレーション | 1件あたり 2〜数回 |
 | Artifact Registry | 保存 0.5GB | イメージ1つで数百MB。7節の設定で古いものを消す |
 | Cloud Build | 1日あたりのビルド時間に枠あり | デプロイのたびに数分 |
 
-- 最初に無料枠を超えそうなのは、Cloud Storage の保存容量。写真1枚を 3MB とすると、5GB でおよそ 1,600 枚。超えた分は、1GB あたり月に数円程度（要確認）。
-- 日本から `us-central1` へのアップロード（受信）は無料。サーバーから外への送信（ダウンロード）は、この用途ではほぼ発生しない。
+- Cloud Storage の保存は、東京では無料枠が付かないので、最初から料金がかかる。Standard の保存は 1GB あたり月に数円程度（要確認）。写真1枚を 3MB とすると、1,600 枚でおよそ 5GB。
+- `asia-northeast1` へのアップロード（受信）は無料。サーバーから外への送信（ダウンロード）は、この用途ではほぼ発生しない。
 - 運用を始めて1か月後に、Cloud Console の「お支払い」で実際の請求額を確認する。
 
 ## 9. ユーザーが決めること
 
-- プロジェクト ID（`sky-weather-collection` が取れるか）
+- プロジェクト ID（`sky-weather-stg` が取れるか）
 - 請求先アカウントと、予算アラートの金額（例では 500 円）
 - `--max-instances` の上限（例では 2）

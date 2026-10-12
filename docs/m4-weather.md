@@ -299,7 +299,7 @@ server/src/sky_server/
 
 ## 10. GCP 版（PR-B）
 
-構成は design.md の 3節のとおり。リージョンは `us-central1` に統一する（Cloud Storage の常時無料枠が米国の一部リージョンだけのため）。デプロイの手順は `docs/deploy-gcp.md` にある。
+構成は design.md の 3節のとおり。リージョンは `asia-northeast1`（東京）に統一する（日本の利用者に近く、Firestore の場所は後から変えられないため。Cloud Storage の常時無料枠は東京では付かない）。デプロイの手順は `docs/deploy-gcp.md` にある。
 
 ### 10.1 どちらの版を使うか
 
@@ -312,7 +312,7 @@ server/src/sky_server/
 |---|---|---|
 | `SKY_GCP_PROJECT` | （必須） | プロジェクト ID |
 | `SKY_GCS_BUCKET` | （必須） | 画像と天気データを置くバケット |
-| `SKY_TASKS_LOCATION` | `us-central1` | Cloud Tasks のキューのリージョン |
+| `SKY_TASKS_LOCATION` | `asia-northeast1` | Cloud Tasks のキューのリージョン |
 | `SKY_TASKS_QUEUE` | `weather-fetch` | キューの名前 |
 | `SKY_TASKS_TARGET_URL` | （必須） | `https://<Cloud Run の URL>/internal/tasks/fetch-weather` |
 | `SKY_TASKS_SERVICE_ACCOUNT` | （必須） | Cloud Tasks が OIDC トークンを発行するときのサービスアカウントのメール |
@@ -357,7 +357,7 @@ Cloud Tasks の時計とサーバーの時計は少しずれることがある�
 
 ### 10.7 撮影者の作成
 
-`SKY_BACKEND=gcp` と 10.1節の設定を付けて、手元の PC から `admin create-user` を実行する（`gcloud auth application-default login` の認証情報で Firestore に書く）。
+`SKY_BACKEND=gcp` と 10.1節の設定を付けて、Cloud Shell から `admin create-user` を実行する（Cloud Shell にログインしているアカウントの認証情報で Firestore に書く。手順は `docs/deploy-gcp.md` 6節）。
 
 ### 10.8 テスト
 

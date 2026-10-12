@@ -45,7 +45,7 @@ async function getStatus(url: string, token?: string): Promise<number | null> {
 }
 
 async function checkConnection(serverUrl: string, inviteCode: string): Promise<string> {
-  const health = await getStatus(`${serverUrl}/healthz`);
+  const health = await getStatus(`${serverUrl}/health`);
   if (health === null) return "サーバーにつながりません。URL と Wi-Fi を確かめてください。";
   if (health !== 200) return `サーバーが正常に答えません（HTTP ${health}）。`;
   const auth = await getStatus(`${serverUrl}/v1/observations/${randomUUID()}`, inviteCode);
