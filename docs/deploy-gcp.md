@@ -229,6 +229,12 @@ source ~/sky-env.sh
 cd ~/sky-weather-collection/server && uv run python -m sky_server.admin create-user --name alice
 ```
 
+友達の端末に設定を渡すときは、`create-user` に `--setup-server-url $SERVICE_URL` を付けて撮影者を作る。設定リンクと QR コードが表示されるので、アプリの「QRコードで設定」で読み取る（`docs/m6-app-update-invite.md` 2節）。QR コードには招待コードが入っているので、画面ごと人に見せない、写真を撮って送らない。
+
+```sh
+uv run python -m sky_server.admin create-user --name alice --setup-server-url $SERVICE_URL
+```
+
 表示された招待コードで、`server/README.md` の curl の例（`http://localhost:8000` を `$SERVICE_URL` に変える）を使って1件アップロードする。
 
 ```sh
