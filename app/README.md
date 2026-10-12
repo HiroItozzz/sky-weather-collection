@@ -53,6 +53,23 @@ npx expo start
 
 - USB でつなぐ場合は、端末の「USB デバッグ」をオンにし、PC に Android SDK Platform-Tools（`adb`）を入れてから `npx expo start --android`。
 
+## APK を作って配る（EAS Build）
+
+Expo のクラウドでビルドするので、Android Studio は要らない。Expo のアカウント（無料）が必要。無料のプランは、月にビルドできる回数に上限があり、順番待ちもある。
+
+```bash
+cd app
+npx eas-cli@latest login
+npx eas-cli@latest build -p android --profile preview
+```
+
+- 初回は、Expo 側にプロジェクトを作るか聞かれるので、作る。`app.json` に `extra.eas.projectId` が書き足されるので、コミットする。
+- 署名の鍵（keystore）を作るか聞かれたら、Expo に作って保管してもらう。同じ鍵で署名しないと、上書きでの更新ができない。
+- 終わると、APK のダウンロードの URL と QR コードが表示される。端末で開いて入れる（「提供元不明のアプリ」の許可を求められる）。
+- 設定は `eas.json` の `preview`（`distribution: internal`、`buildType: apk`）。パッケージ名は `io.github.hiroitozzz.skyweather`。Google Play で公開したあとは変えられない。
+- 新しい版を配るときは、`app.json` の `android.versionCode` を1増やしてからビルドする（同じか小さい番号の APK は上書きで入らない）。
+- APK（リリースビルド）では、暗号化されていない `http://` の通信を Android が止める。サーバーの URL は Cloud Run などの `https://` にする。手元のサーバー（`http://<PC の IP>:8000`）で試すときは Expo Go を使う。
+
 ## 開発用のコマンド
 
 ```bash
