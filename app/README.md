@@ -70,6 +70,19 @@ npx eas-cli@latest build -p android --profile preview
 - 新しい版を配るときは、`app.json` の `android.versionCode` を1増やしてからビルドする（同じか小さい番号の APK は上書きで入らない）。
 - APK（リリースビルド）では、暗号化されていない `http://` の通信を Android が止める。サーバーの URL は Cloud Run などの `https://` にする。手元のサーバー（`http://<PC の IP>:8000`）で試すときは Expo Go を使う。
 
+### 修正を APK なしで届ける（EAS Update）
+
+JavaScript の修正だけなら、APK を入れ直さずに届けられる（仕様は [`docs/m6-app-update-invite.md`](../docs/m6-app-update-invite.md)）。
+
+```bash
+cd app
+npx eas-cli@latest update --channel preview --message "変更の説明"
+```
+
+- ネイティブの部分を変えたとき（パッケージの追加、`app.json` の `android` や `plugins` の変更など）は、update ではなく APK を作り直して配る。`runtimeVersion` の `fingerprint` が変わるので、古い APK には更新が届かない。
+- 更新は、端末でアプリを2回起動すると反映される（1回目で取ってきて、2回目から使う）。
+- 動いている版は、設定の画面の下で確かめられる（`アプリ 1.0.0（3）`、`更新 {ID の先頭8文字}（日時）`）。更新を使っていないときは `更新 なし（APK のまま）`。Expo Go や開発中は、更新の行を出さない。
+
 ## 開発用のコマンド
 
 ```bash
@@ -93,6 +106,7 @@ src/transport.ts      サーバーへの PUT と、応答の分類
 src/uploadQueue.ts    再送キュー（送る順番、待ち時間、止めどころ）
 src/useUploadQueue.ts 再送のきっかけ（起動、前面、電波、30秒ごと）
 src/settings.ts       サーバーの URL と招待コード（expo-secure-store）
+src/setupLink.ts      設定リンク（skyweather://setup?...）の読み取り
 src/orientation.ts    回転行列からカメラの方位角・仰角・ロールを計算する
 src/declination.ts    WMM2025 による偏角と全磁力
 src/record.ts         向きと位置を、設計メモ4節の orientation / location の形にする

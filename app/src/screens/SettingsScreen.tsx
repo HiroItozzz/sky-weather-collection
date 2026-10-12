@@ -1,6 +1,7 @@
-// 設定・送信状況の画面。仕様は docs/m3-app-capture.md の 7.2 節。
-import { useCallback, useEffect, useState } from "react";
+// 設定・送信状況の画面。仕様は docs/m3-app-capture.md の 7.2 節と docs/m6-app-update-invite.md の 1.2・2.3 節。
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Alert,
   Platform,
   Pressable,
   ScrollView,
@@ -10,9 +11,13 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { CameraView, useCameraPermissions } from "expo-camera";
+import Constants from "expo-constants";
 import { randomUUID } from "expo-crypto";
+import * as Updates from "expo-updates";
 import { observationStore } from "../observationStore";
 import { loadSettings, normalizeServerUrl, saveSettings } from "../settings";
+import { parseSetupLink } from "../setupLink";
 import type { QueueItem, QueueState, UploadQueue } from "../uploadQueue";
 import { warnOnFailure } from "../useUploadQueue";
 
@@ -25,6 +30,9 @@ type Props = {
   queue: UploadQueue;
   queueState: QueueState;
   onBack: () => void;
+  /** 設定リンクでアプリが開かれたときのリンク。受け取ったら onSetupLinkConsumed で空にしてもらう。 */
+  setupLink: string | null;
+  onSetupLinkConsumed: () => void;
 };
 
 /** 接続の確認で GET して、状態コードだけを返す。通信できなければ null。 */
@@ -66,12 +74,85 @@ function formatTime(iso: string): string {
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString("ja-JP");
 }
 
-export default function SettingsScreen({ queue, queueState, onBack }: Props) {
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+/** いま動いている版の表示（仕様は docs/m6-app-update-invite.md の 1.2 節）。更新の行は、更新の機能が無効なら null。 */
+function versionLines(): { app: string; update: string | null } {
+  const version = Constants.expoConfig?.version ?? "不明";
+  const versionCode = Constants.expoConfig?.android?.versionCode ?? "不明";
+  const app = `アプリ ${version}（${versionCode}）`;
+  if (!Updates.isEnabled) return { app, update: null };
+  if (Updates.isEmbeddedLaunch || Updates.updateId === null) {
+    return { app, update: "更新 なし（APK のまま）" };
+  }
+  const created = Updates.createdAt;
+  const time = created
+    ? `${created.getFullYear()}-${pad2(created.getMonth() + 1)}-${pad2(created.getDate())} ` +
+      `${pad2(created.getHours())}:${pad2(created.getMinutes())}`
+    : "日時不明";
+  return { app, update: `更新 ${Updates.updateId.slice(0, 8)}（${time}）` };
+}
+
+/** QR コードの読み取り画面。最初に読めた1つだけを onScanned に渡す。 */
+function QrScanner({
+  onScanned,
+  onCancel,
+}: {
+  onScanned: (text: string) => void;
+  onCancel: () => void;
+}) {
+  const [permission, requestPermission] = useCameraPermissions();
+  const handled = useRef(false);
+
+  return (
+    <View style={styles.container}>
+      {permission?.granted ? (
+        <CameraView
+          style={StyleSheet.absoluteFill}
+          facing="back"
+          barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+          onBarcodeScanned={({ data }) => {
+            if (handled.current) return;
+            handled.current = true;
+            onScanned(data);
+          }}
+        />
+      ) : null}
+      <View style={styles.header}>
+        <Pressable onPress={onCancel} style={styles.smallButton}>
+          <Text style={styles.buttonText}>やめる</Text>
+        </Pressable>
+        {permission?.granted ? (
+          <Text style={styles.scanHint}>招待の QR コードを枠に入れてください。</Text>
+        ) : permission !== null && permission.canAskAgain ? (
+          <Pressable onPress={requestPermission} style={styles.button}>
+            <Text style={styles.buttonText}>カメラを許可する</Text>
+          </Pressable>
+        ) : permission !== null ? (
+          <Text style={styles.warn}>
+            カメラが拒否されています。端末の設定からカメラを許可してください。
+          </Text>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+export default function SettingsScreen({
+  queue,
+  queueState,
+  onBack,
+  setupLink,
+  onSetupLinkConsumed,
+}: Props) {
   const [serverUrl, setServerUrl] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [formMessage, setFormMessage] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [items, setItems] = useState<QueueItem[]>([]);
+  const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
     loadSettings()
@@ -99,24 +180,41 @@ export default function SettingsScreen({ queue, queueState, onBack }: Props) {
     void reloadItems();
   }, [reloadItems, queueState.pendingCount, queueState.running]);
 
-  const onSave = async () => {
-    const normalized = normalizeServerUrl(serverUrl, { allowHttp: __DEV__ });
+  /** 保存する。手入力の「保存」と、設定リンク・QR コードの「設定する」で共通。保存できたら正規化した URL を返す。 */
+  const saveInput = async (url: string, code: string): Promise<string | null> => {
+    const normalized = normalizeServerUrl(url, { allowHttp: __DEV__ });
     if (normalized === null) {
       setFormMessage(URL_FORMAT_MESSAGE);
-      return;
+      return null;
     }
-    const code = inviteCode.trim();
+    const trimmedCode = code.trim();
     try {
-      await saveSettings({ serverUrl: normalized, inviteCode: code });
+      await saveSettings({ serverUrl: normalized, inviteCode: trimmedCode });
     } catch (e) {
       console.warn("設定の保存に失敗しました", e);
       setFormMessage("設定を保存できませんでした。");
-      return;
+      return null;
     }
     setServerUrl(normalized);
-    setInviteCode(code);
+    setInviteCode(trimmedCode);
     setFormMessage("保存しました。");
     warnOnFailure(queue.resumeAfterSettingsSaved(), "設定の保存後の送信");
+    return normalized;
+  };
+
+  /** 接続を確かめて、結果を表示する。手入力の「接続を確かめる」と、設定リンク・QR コードで共通。 */
+  const checkInput = async (normalizedUrl: string, code: string) => {
+    setChecking(true);
+    setFormMessage("確かめています…");
+    try {
+      setFormMessage(await checkConnection(normalizedUrl, code.trim()));
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const onSave = async () => {
+    await saveInput(serverUrl, inviteCode);
   };
 
   const onCheck = async () => {
@@ -125,14 +223,41 @@ export default function SettingsScreen({ queue, queueState, onBack }: Props) {
       setFormMessage(URL_FORMAT_MESSAGE);
       return;
     }
-    setChecking(true);
-    setFormMessage("確かめています…");
-    try {
-      setFormMessage(await checkConnection(normalized, inviteCode.trim()));
-    } finally {
-      setChecking(false);
-    }
+    await checkInput(normalized, inviteCode);
   };
+
+  // 読み取った QR コードや、開かれた設定リンクは、確認のダイアログを出してから保存する
+  const confirmSetupLink = (text: string) => {
+    setScanning(false);
+    const parsed = parseSetupLink(text);
+    if ("error" in parsed) {
+      setFormMessage(parsed.error);
+      return;
+    }
+    Alert.alert(
+      "設定の確認",
+      `このサーバーに写真と位置を送るように設定します。\n${parsed.serverUrl}\n心当たりのない QR コードなら「やめる」を押してください。`,
+      [
+        { text: "やめる", style: "cancel" },
+        {
+          text: "設定する",
+          onPress: () => {
+            void (async () => {
+              const normalized = await saveInput(parsed.serverUrl, parsed.inviteCode);
+              if (normalized !== null) await checkInput(normalized, parsed.inviteCode);
+            })();
+          },
+        },
+      ],
+    );
+  };
+
+  useEffect(() => {
+    if (setupLink === null) return;
+    onSetupLinkConsumed();
+    confirmSetupLink(setupLink);
+    // setupLink が変わったときだけ処理する
+  }, [setupLink]);
 
   const onRetry = (id: string) => {
     warnOnFailure(
@@ -143,6 +268,12 @@ export default function SettingsScreen({ queue, queueState, onBack }: Props) {
       "送り直し",
     );
   };
+
+  if (scanning) {
+    return <QrScanner onScanned={confirmSetupLink} onCancel={() => setScanning(false)} />;
+  }
+
+  const version = versionLines();
 
   return (
     <View style={styles.container}>
@@ -173,6 +304,9 @@ export default function SettingsScreen({ queue, queueState, onBack }: Props) {
           autoCorrect={false}
           secureTextEntry
         />
+        <Pressable onPress={() => setScanning(true)} style={styles.button}>
+          <Text style={styles.buttonText}>QRコードで設定</Text>
+        </Pressable>
         <View style={styles.row}>
           <Pressable onPress={onSave} style={styles.button}>
             <Text style={styles.buttonText}>保存</Text>
@@ -226,6 +360,9 @@ export default function SettingsScreen({ queue, queueState, onBack }: Props) {
             ) : null}
           </View>
         ))}
+
+        <Text style={styles.version}>{version.app}</Text>
+        {version.update !== null ? <Text style={styles.version}>{version.update}</Text> : null}
       </ScrollView>
     </View>
   );
@@ -270,6 +407,8 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     backgroundColor: "#1976d2",
   },
+  version: { fontSize: 12, color: "#777", marginTop: 4 },
+  scanHint: { fontSize: 15, color: "#fff", marginTop: 12 },
   disabled: { backgroundColor: "#90a4ae" },
   buttonText: { color: "#fff", fontSize: 15, fontWeight: "bold" },
 });

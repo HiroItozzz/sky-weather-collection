@@ -6,12 +6,19 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "scheme": "skyweather",
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/07639bc8-b6b7-497a-aeab-3d9647d8e36f"
+    },
     "ios": {
       "supportsTablet": true
     },
     "android": {
       "package": "io.github.hiroitozzz.skyweather",
-      "versionCode": 2,
+      "versionCode": 3,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",

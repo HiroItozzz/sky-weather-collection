@@ -1,9 +1,11 @@
 import hashlib
 from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qs, urlsplit
 
+import pytest
 from conftest import SteppingClock
 
-from sky_server.admin import create_user, main, revoke_user, run_due_jobs
+from sky_server.admin import build_setup_link, create_user, main, revoke_user, run_due_jobs
 from sky_server.jobs import LocalTaskScheduler
 from sky_server.storage import LocalObservationRepository
 
@@ -37,6 +39,52 @@ def test_コマンドで作成と無効化ができる(tmp_path, monkeypatch, ca
     user_id = out.splitlines()[0].split(": ")[1]
     assert main(["revoke-user", "--user-id", user_id]) == 0
     assert main(["revoke-user", "--user-id", "nope"]) == 1
+
+
+def test_設定リンクはサーバーのURLと招待コードをURLエンコードして入れる():
+    link = build_setup_link("https://example.com:8443", "ab+c/d=e&f g")
+    assert link == (
+        "skyweather://setup?server=https%3A%2F%2Fexample.com%3A8443&code=ab%2Bc%2Fd%3De%26f%20g"
+    )
+    parts = urlsplit(link)
+    assert (parts.scheme, parts.netloc) == ("skyweather", "setup")
+    assert parse_qs(parts.query) == {
+        "server": ["https://example.com:8443"],
+        "code": ["ab+c/d=e&f g"],
+    }
+
+
+def test_setup_server_urlを付けると設定リンクとQRコードを表示する(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SKY_DATA_DIR", str(tmp_path))
+    assert main(["create-user", "--name", "bob", "--setup-server-url", "https://example.com/"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    # 先頭の2行は、付けないときと同じ形（CI の e2e が読む）
+    assert lines[0].startswith("user_id: ")
+    prefix = "招待コード（この1回だけ表示されます）: "
+    assert lines[1].startswith(prefix)
+    token = lines[1][len(prefix) :]
+    assert lines[2] == f"設定リンク: {build_setup_link('https://example.com', token)}"
+    # QR コードは文字で描かれる（画像のファイルは作らない）
+    assert len(lines) > 10
+    assert not list(tmp_path.rglob("*.png"))
+
+
+def test_setup_server_urlがなければ今までどおり2行だけ表示する(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SKY_DATA_DIR", str(tmp_path))
+    assert main(["create-user", "--name", "bob"]) == 0
+    assert len(capsys.readouterr().out.splitlines()) == 2
+
+
+@pytest.mark.parametrize("url", ["http://example.com", "example.com", "https://", ""])
+def test_setup_server_urlがhttpsでなければ撮影者を作らずに終了する(
+    tmp_path, monkeypatch, capsys, url
+):
+    monkeypatch.setenv("SKY_DATA_DIR", str(tmp_path))
+    with pytest.raises(SystemExit) as exc_info:
+        main(["create-user", "--name", "bob", "--setup-server-url", url])
+    assert exc_info.value.code == 2
+    assert "--setup-server-url" in capsys.readouterr().err
+    assert not list(tmp_path.rglob("*.json"))
 
 
 class FakeRunner:

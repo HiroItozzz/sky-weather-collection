@@ -54,7 +54,8 @@ jobs:
         run: |
           uv sync --frozen --no-dev
           uv run python -m sky_server.admin create-user --name ci > "$RUNNER_TEMP/user.txt"
-          uv run uvicorn sky_server.main:create_app --factory --port 8765 > "$RUNNER_TEMP/server.log" 2>&1 &
+          # uv run だと、uv がキャッシュのロックを持ったまま残り、job の後片付け（uv cache prune）が待たされるので、直接起動する
+          .venv/bin/uvicorn sky_server.main:create_app --factory --port 8765 > "$RUNNER_TEMP/server.log" 2>&1 &
           for i in $(seq 30); do curl -sf http://127.0.0.1:8765/health && break; sleep 1; done
       - name: 通しのテスト
         working-directory: app

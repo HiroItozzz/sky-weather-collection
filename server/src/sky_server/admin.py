@@ -6,6 +6,9 @@ import sys
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from urllib.parse import quote
+
+import qrcode
 
 from sky_server.auth import generate_token, hash_token
 from sky_server.backends import Backend, build_backend
@@ -41,6 +44,18 @@ def create_user(repository: ObservationRepository, name: str) -> tuple[User, str
     )
     repository.add_user(user)
     return user, token
+
+
+def build_setup_link(server_url: str, token: str) -> str:
+    """アプリに設定を渡す設定リンクを作る。サーバーの URL と招待コードは URL エンコードする。"""
+    return f"skyweather://setup?server={quote(server_url, safe='')}&code={quote(token, safe='')}"
+
+
+def print_setup_qr(link: str) -> None:
+    """設定リンクの QR コードを、文字で標準出力に描く。画像のファイルは作らない。"""
+    qr = qrcode.QRCode()
+    qr.add_data(link)
+    qr.print_ascii(invert=True)
 
 
 def find_user(repository: ObservationRepository, user_id: str) -> User | None:
@@ -290,11 +305,25 @@ def _in_range(text: str, name: str, low: float, high: float) -> float:
     return value
 
 
+def _setup_server_url(text: str) -> str:
+    """`--setup-server-url` の検査。`https://` で始まらなければエラー。末尾の `/` は取る。"""
+    url = text.strip().rstrip("/")
+    if not url.lower().startswith("https://") or url.lower() == "https://":
+        raise argparse.ArgumentTypeError(f"https:// で始まる URL を指定してください: {text!r}")
+    return url
+
+
 def main(argv: list[str] | None = None, clock: Clock = utc_now) -> int:
     parser = argparse.ArgumentParser(prog="sky_server.admin")
     sub = parser.add_subparsers(dest="command", required=True)
     create = sub.add_parser("create-user", help="撮影者を作り、招待コードを1回だけ表示する")
     create.add_argument("--name", required=True)
+    create.add_argument(
+        "--setup-server-url",
+        type=_setup_server_url,
+        metavar="URL",
+        help="アプリの設定リンクとその QR コードを表示する（サーバーの URL。https:// で始める）",
+    )
     revoke = sub.add_parser("revoke-user", help="撮影者の招待コードを無効にする")
     revoke.add_argument("--user-id", required=True)
     add_zone = sub.add_parser("add-privacy-zone", help="撮影者にプライバシーゾーンを追加する")
@@ -348,6 +377,10 @@ def main(argv: list[str] | None = None, clock: Clock = utc_now) -> int:
         user, token = create_user(repository, args.name)
         print(f"user_id: {user.user_id}")
         print(f"招待コード（この1回だけ表示されます）: {token}")
+        if args.setup_server_url is not None:
+            link = build_setup_link(args.setup_server_url, token)
+            print(f"設定リンク: {link}")
+            print_setup_qr(link)
         return 0
 
     if args.command == "revoke-user":
