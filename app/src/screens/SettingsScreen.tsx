@@ -247,6 +247,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     marginBottom: 8,
     fontSize: 16,
+    color: "#000", // 端末がダークモードでも背景（白）に合う文字色にする
   },
   row: { flexDirection: "row", alignItems: "center", gap: 12, marginVertical: 4 },
   text: { fontSize: 15 },
