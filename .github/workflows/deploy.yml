@@ -20,7 +20,7 @@ env:
   SERVICE: sky-server
   IMAGE: asia-northeast1-docker.pkg.dev/sky-weather-stg/sky/sky-server
   # docs/cd.md 2.3節の最後のコマンドで表示される値
-  WIF_PROVIDER: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github/providers/sky-weather-collection
+  WIF_PROVIDER: projects/671929077433/locations/global/workloadIdentityPools/github/providers/sky-weather-collection
   DEPLOY_SA: sky-deployer@sky-weather-stg.iam.gserviceaccount.com
 
 jobs:
